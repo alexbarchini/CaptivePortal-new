@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= title %></title>
+  <link rel="stylesheet" href="/public/style.css" />
+</head>
+<body>
+  <header class="header">
+    <div class="logo-wrap">
+      <img src="/public/trt9-placeholder.svg" alt="TRT9" class="logo"/>
+      <div>
+        <h1>Cadastro de visitante</h1>
+        <p>Portal externo SmartZone WISPr</p>
+      </div>
+    </div>
+  </header>
+  <main class="container">
+    <section class="card wide">
+      <% if (error) { %><div class="alert error"><%= error %></div><% } %>
+      <form method="post" action="/register">
+        <label>CPF</label>
+        <input name="cpf" required placeholder="Somente números" value="<%= values.cpf || '' %>" />
+
+        <label>Telefone</label>
+        <input name="phone" required placeholder="DDD + número" value="<%= values.phone || '' %>" />
+
+        <label>Senha</label>
+        <input name="password" type="password" required />
+
+        <label>Confirmar senha</label>
+        <input name="confirmPassword" type="password" required />
+
+        <label class="check"><input type="checkbox" name="accepted_terms" required /> Li e concordo com os Termos de Uso</label>
+        <label class="check"><input type="checkbox" name="accepted_privacy" required /> Li e concordo com a Política de Privacidade</label>
+        <label class="check"><input type="checkbox" name="accepted_processing" required /> Autorizo o tratamento dos dados pessoais para fins de controle de acesso e auditoria (LGPD)</label>
+
+        <% Object.keys(params || {}).forEach((key) => { %>
+          <input type="hidden" name="<%= key %>" value="<%= params[key] %>" />
+        <% }) %>
+
+        <button type="submit">Cadastrar</button>
+      </form>
+      <p class="subtle"><a href="/portal?<%= new URLSearchParams(params || {}).toString() %>">Voltar para login</a></p>
+    </section>
+  </main>
+</body>
+</html>

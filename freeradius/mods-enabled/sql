@@ -1,0 +1,17 @@
+sql {
+  driver = "rlm_sql_postgresql"
+  dialect = "postgresql"
+  server = "${env:DB_SERVER}"
+  port = ${env:DB_PORT}
+  login = "${env:DB_LOGIN}"
+  password = "${env:DB_PASSWORD}"
+  radius_db = "${env:DB_NAME}"
+  read_clients = no
+  client_table = "nas"
+  accounting {
+    reference = "%{tolower:type.%{Acct-Status-Type}.query}"
+  }
+  post-auth {
+    reference = ".query"
+  }
+}

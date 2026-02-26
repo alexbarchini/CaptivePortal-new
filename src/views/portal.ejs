@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= title %></title>
+  <link rel="stylesheet" href="/public/style.css" />
+</head>
+<body>
+  <header class="header">
+    <div class="logo-wrap">
+      <img src="/public/trt9-placeholder.svg" alt="TRT9" class="logo"/>
+      <div>
+        <h1>TRT9 · Rede de Visitantes</h1>
+        <p>Acesso controlado e auditável</p>
+      </div>
+    </div>
+  </header>
+  <main class="container">
+    <section class="card">
+      <h2>Entrar no Wi-Fi de visitantes</h2>
+      <% if (error) { %><div class="alert error"><%= error %></div><% } %>
+      <% if (message) { %><div class="alert ok"><%= message %></div><% } %>
+      <form method="post" action="/login">
+        <label>CPF</label>
+        <input name="cpf" required placeholder="Somente números" />
+
+        <label>Senha</label>
+        <input name="password" type="password" required />
+
+        <% Object.keys(params || {}).forEach((key) => { %>
+          <input type="hidden" name="<%= key %>" value="<%= params[key] %>" />
+        <% }) %>
+
+        <button type="submit">Conectar</button>
+      </form>
+      <p class="subtle">Não possui cadastro? <a href="/register?<%= new URLSearchParams(params || {}).toString() %>">Criar acesso de visitante</a></p>
+    </section>
+  </main>
+</body>
+</html>
