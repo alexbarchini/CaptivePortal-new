@@ -41,6 +41,12 @@ function getOriginalUrl(params) {
   return params.url || params.orig_url || '/success';
 }
 
+function normalizeBodyFields(body = {}) {
+  return Object.fromEntries(
+    Object.entries(body).map(([key, value]) => [key, Array.isArray(value) ? value[0] : value])
+  );
+}
+
 app.get('/healthz', (_, res) => res.json({ status: 'ok' }));
 
 app.get('/portal', (req, res) => {
@@ -61,14 +67,19 @@ app.get('/register', (req, res) => {
   });
 });
 
+app.get('/terms', (_, res) => {
+  res.render('terms', { title: 'Termos de Uso' });
+});
+
 app.post('/register', async (req, res) => {
   const params = getRedirectParams(req);
-  const parsed = registerSchema.safeParse(req.body);
+  const normalizedBody = normalizeBodyFields(req.body);
+  const parsed = registerSchema.safeParse(normalizedBody);
   if (!parsed.success) {
     return res.status(400).render('register', {
       title: 'Cadastro de visitante',
       error: parsed.error.issues[0].message,
-      values: req.body,
+      values: normalizedBody,
       params
     });
   }
@@ -95,7 +106,7 @@ app.post('/register', async (req, res) => {
       `INSERT INTO lgpd_consents (
           user_id, accepted_terms, accepted_privacy, accepted_processing,
           terms_version, privacy_version, accepted_at, ip, user_agent
-        ) VALUES ($1, true, true, true, $2, $3, NOW(), $4, $5)`,
+) VALUES ($1, true, false, true, $2, $3, NOW(), $4, $5)`,
       [
         user.id,
         process.env.TERMS_VERSION || 'v1.0',
@@ -115,7 +126,7 @@ app.post('/register', async (req, res) => {
     return res.status(500).render('register', {
       title: 'Cadastro de visitante',
       error: 'Falha ao cadastrar usuário.',
-      values: req.body,
+      values: normalizedBody,
       params
     });
   }
@@ -123,7 +134,8 @@ app.post('/register', async (req, res) => {
 
 app.post('/login', async (req, res) => {
   const params = getRedirectParams(req);
-  const parsed = loginSchema.safeParse(req.body);
+  const normalizedBody = normalizeBodyFields(req.body);
+  const parsed = loginSchema.safeParse(normalizedBody);
   if (!parsed.success) {
     return res.status(400).render('portal', {
       title: 'Portal Visitantes TRT9',
