@@ -10,6 +10,7 @@ const { pool } = require('./db');
 const { runMigrations } = require('./db/migrate');
 const { registerSchema, loginSchema } = require('./utils/validators');
 const { loginAndPoll } = require('./services/nbi');
+const { LOG_PATH, logInfo, logError } = require('./utils/logger');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -47,6 +48,22 @@ function normalizeBodyFields(body = {}) {
   );
 }
 
+function sanitizeParams(params = {}) {
+  const sanitized = { ...params };
+  delete sanitized.password;
+  delete sanitized.confirmPassword;
+  return sanitized;
+}
+
+class AuthFlowError extends Error {
+  constructor(message, userMessage, statusCode = 401) {
+    super(message);
+    this.name = 'AuthFlowError';
+    this.userMessage = userMessage;
+    this.statusCode = statusCode;
+  }
+}
+
 app.get('/healthz', (_, res) => res.json({ status: 'ok' }));
 
 app.get('/portal', (req, res) => {
@@ -74,8 +91,20 @@ app.get('/terms', (_, res) => {
 app.post('/register', async (req, res) => {
   const params = getRedirectParams(req);
   const normalizedBody = normalizeBodyFields(req.body);
+  const requestContext = {
+    cpf: normalizedBody.cpf,
+    request_ip: req.ip,
+    user_agent: req.get('user-agent') || '',
+    params: sanitizeParams(params)
+  };
+
+  logInfo('register_attempt_started', requestContext);
   const parsed = registerSchema.safeParse(normalizedBody);
   if (!parsed.success) {
+    logInfo('register_attempt_validation_failed', {
+      ...requestContext,
+      validation_error: parsed.error.issues[0].message
+    });
     return res.status(400).render('register', {
       title: 'Cadastro de visitante',
       error: parsed.error.issues[0].message,
@@ -85,7 +114,7 @@ app.post('/register', async (req, res) => {
   }
 
   const { cpf, phone, password } = parsed.data;
-  const usernameRadius = cpf;
+  const usernameRadius = `visitante_${cpf}`;
 
   try {
     const passwordHash = await argon2.hash(password);
@@ -116,6 +145,12 @@ app.post('/register', async (req, res) => {
       ]
     );
 
+    logInfo('register_attempt_success', {
+      ...requestContext,
+      user_id: user.id,
+      normalized_cpf: user.cpf
+    });
+
     return res.render('portal', {
       title: 'Portal Visitantes TRT9',
       error: null,
@@ -123,6 +158,10 @@ app.post('/register', async (req, res) => {
       params
     });
   } catch (error) {
+    logError('register_attempt_failed', {
+      ...requestContext,
+      error
+    });
     return res.status(500).render('register', {
       title: 'Cadastro de visitante',
       error: 'Falha ao cadastrar usuário.',
@@ -135,8 +174,20 @@ app.post('/register', async (req, res) => {
 app.post('/login', async (req, res) => {
   const params = getRedirectParams(req);
   const normalizedBody = normalizeBodyFields(req.body);
+  const requestContext = {
+    cpf: normalizedBody.cpf,
+    request_ip: req.ip,
+    user_agent: req.get('user-agent') || '',
+    params: sanitizeParams(params)
+  };
+
+  logInfo('login_attempt_started', requestContext);
   const parsed = loginSchema.safeParse(normalizedBody);
   if (!parsed.success) {
+    logInfo('login_attempt_validation_failed', {
+      ...requestContext,
+      validation_error: parsed.error.issues[0].message
+    });
     return res.status(400).render('portal', {
       title: 'Portal Visitantes TRT9',
       error: parsed.error.issues[0].message,
@@ -153,25 +204,42 @@ app.post('/login', async (req, res) => {
        WHERE regexp_replace(cpf, '\\D', '', 'g') = $1`,
       [cpf]
     );
-    if (query.rowCount === 0) throw new Error('Usuário não encontrado');
+    if (query.rowCount === 0) {
+      throw new AuthFlowError('Usuário não encontrado para CPF informado.', 'CPF ou senha inválidos.');
+    }
 
     const user = query.rows[0];
-    if (!user.is_active) throw new Error('Usuário inativo');
+    if (!user.is_active) {
+      throw new AuthFlowError('Usuário inativo.', 'Usuário inativo. Entre em contato com o suporte.');
+    }
 
     const ok = await argon2.verify(user.password_hash, password);
-    if (!ok) throw new Error('Senha inválida');
+    if (!ok) {
+      throw new AuthFlowError('Falha na verificação do hash Argon2 para o usuário.', 'CPF ou senha inválidos.');
+    }
+
+    logInfo('login_password_verified', {
+      ...requestContext,
+      user_id: user.id,
+      normalized_cpf: user.cpf,
+      username_radius: user.username_radius
+    });
 
     const ueIp = params['UE-IP'] || params.ue_ip || params.uip;
     const ueMac = params['UE-MAC'] || params.ue_mac || params.client_mac;
 
     if (!ueIp || !ueMac) {
-      throw new Error('Parâmetros de cliente (UE-IP/UE-MAC) ausentes no redirect WISPr.');
+      throw new AuthFlowError(
+        'Parâmetros de cliente (UE-IP/UE-MAC) ausentes no redirect WISPr.',
+        'Login válido, mas faltam parâmetros de rede (UE-IP/UE-MAC) no redirect do portal.',
+        400
+      );
     }
 
     const nbiResult = await loginAndPoll({
       ueIp,
       ueMac,
-      ueUsername: user.cpf,
+      ueUsername: user.username_radius || `visitante_${user.cpf}`,
       uePassword: password,
       redirectParams: params
     });
@@ -192,16 +260,26 @@ app.post('/login', async (req, res) => {
       ]
     );
 
+    logInfo('login_attempt_nbi_result', {
+      ...requestContext,
+      user_id: user.id,
+      normalized_cpf: user.cpf,
+      ue_ip: ueIp,
+      ue_mac: ueMac,
+      nbi_success: nbiResult.success,
+      nbi_mode: nbiResult.mode,
+      nbi_detail: nbiResult.detail
+    });
+
     if (nbiResult.success) {
       return res.redirect(getOriginalUrl(params));
     }
 
-    return res.status(401).render('portal', {
-      title: 'Portal Visitantes TRT9',
-      error: 'Falha na autorização do acesso. Tente novamente.',
-      message: null,
-      params
-    });
+    throw new AuthFlowError(
+      `NBI retornou falha na autorização: ${JSON.stringify(nbiResult.detail)}`,
+      'Falha na autorização do acesso. Tente novamente.',
+      401
+    );
   } catch (error) {
     await pool.query(
       `INSERT INTO auth_events (user_id, cpf, client_mac, client_ip, ap, ssid, result, reason, raw_params_json)
@@ -217,9 +295,20 @@ app.post('/login', async (req, res) => {
       ]
     );
 
-    return res.status(401).render('portal', {
+    logError('login_attempt_failed', {
+      ...requestContext,
+      normalized_cpf: parsed.success ? parsed.data.cpf : normalizedBody.cpf,
+      error
+    });
+
+    const statusCode = error instanceof AuthFlowError ? error.statusCode : 401;
+    const userMessage = error instanceof AuthFlowError
+      ? error.userMessage
+      : 'CPF ou senha inválidos.';
+
+    return res.status(statusCode).render('portal', {
       title: 'Portal Visitantes TRT9',
-      error: 'CPF ou senha inválidos.',
+      error: userMessage,
       message: null,
       params
     });
@@ -234,6 +323,7 @@ async function bootstrap() {
   await runMigrations(pool);
   app.listen(PORT, () => {
     console.log(`Portal online na porta ${PORT}`);
+    console.log(`Log de autenticação em: ${LOG_PATH}`);
   });
 }
 
