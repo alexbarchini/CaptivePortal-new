@@ -1,0 +1,56 @@
+services:
+  app:
+    build: .
+    container_name: captive-portal-app
+    environment:
+      PORT: 3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: portal
+      DB_PASSWORD: portal123
+      DB_NAME: captive_portal
+      TERMS_VERSION: v1.0
+      PRIVACY_VERSION: v1.0
+      NBI_REQUEST_USERNAME: external-portal
+      NBI_REQUEST_PASSWORD: changeme
+      SZ_MANAGEMENT_IP: 10.0.0.10
+      NBI_MOCK: "true"
+      NBI_TLS_INSECURE: "true"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: captive-portal-db
+    environment:
+      POSTGRES_DB: captive_portal
+      POSTGRES_USER: portal
+      POSTGRES_PASSWORD: portal123
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  freeradius:
+    image: freeradius/freeradius-server:latest
+    container_name: captive-portal-radius
+    depends_on:
+      - postgres
+    volumes:
+      - ./freeradius/clients.conf:/etc/freeradius/3.0/clients.conf:ro
+      - ./freeradius/mods-enabled/sql:/etc/freeradius/3.0/mods-enabled/sql:ro
+      - ./freeradius/sql/main/postgresql/queries.conf:/etc/freeradius/3.0/mods-config/sql/main/postgresql/queries.conf:ro
+    environment:
+      DB_SERVER: postgres
+      DB_PORT: 5432
+      DB_LOGIN: portal
+      DB_PASSWORD: portal123
+      DB_NAME: captive_portal
+    ports:
+      - "1812:1812/udp"
+      - "1813:1813/udp"
+
+volumes:
+  pgdata:
