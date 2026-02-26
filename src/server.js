@@ -85,7 +85,7 @@ app.post('/register', async (req, res) => {
   }
 
   const { cpf, phone, password } = parsed.data;
-  const usernameRadius = `visitante_${cpf}`;
+  const usernameRadius = cpf;
 
   try {
     const passwordHash = await argon2.hash(password);
@@ -147,7 +147,12 @@ app.post('/login', async (req, res) => {
 
   const { cpf, password } = parsed.data;
   try {
-    const query = await pool.query('SELECT id, cpf, username_radius, password_hash, is_active FROM users WHERE cpf = $1', [cpf]);
+    const query = await pool.query(
+      `SELECT id, cpf, username_radius, password_hash, is_active
+       FROM users
+       WHERE regexp_replace(cpf, '\\D', '', 'g') = $1`,
+      [cpf]
+    );
     if (query.rowCount === 0) throw new Error('Usuário não encontrado');
 
     const user = query.rows[0];
@@ -166,7 +171,7 @@ app.post('/login', async (req, res) => {
     const nbiResult = await loginAndPoll({
       ueIp,
       ueMac,
-      ueUsername: user.username_radius,
+      ueUsername: user.cpf,
       uePassword: password,
       redirectParams: params
     });
@@ -214,7 +219,7 @@ app.post('/login', async (req, res) => {
 
     return res.status(401).render('portal', {
       title: 'Portal Visitantes TRT9',
-      error: 'CPF ou senha inválidos, ou falha na autorização SmartZone.',
+      error: 'CPF ou senha inválidos.',
       message: null,
       params
     });
