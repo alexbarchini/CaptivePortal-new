@@ -23,16 +23,9 @@ function isValidCPF(cpfInput) {
 const registerSchema = z.object({
   cpf: z.string().transform(cleanDigits).refine((v) => isValidCPF(v), 'CPF inválido.'),
   phone: z.string().transform(cleanDigits).refine((v) => v.length >= 10 && v.length <= 13, 'Telefone inválido.'),
-  password: z
-    .string()
-    .min(10, 'A senha deve ter no mínimo 10 caracteres.')
-    .regex(/[A-Z]/, 'A senha deve conter letra maiúscula.')
-    .regex(/[a-z]/, 'A senha deve conter letra minúscula.')
-    .regex(/[0-9]/, 'A senha deve conter número.')
-    .regex(/[^A-Za-z0-9]/, 'A senha deve conter caractere especial.'),
+  password: z.string().min(8, 'A senha deve ter no mínimo 8 caracteres.'),
   confirmPassword: z.string(),
   accepted_terms: z.literal('on', { errorMap: () => ({ message: 'Aceite os Termos de Uso.' }) }),
-  accepted_privacy: z.literal('on', { errorMap: () => ({ message: 'Aceite a Política de Privacidade.' }) }),
   accepted_processing: z.literal('on', { errorMap: () => ({ message: 'Autorize o tratamento de dados.' }) })
 }).refine((data) => data.password === data.confirmPassword, {
   message: 'As senhas não conferem.',

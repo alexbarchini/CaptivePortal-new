@@ -26,3 +26,8 @@ button { margin-top:16px; width:100%; background: var(--primary); color:#fff; bo
 .alert.ok { background:#e6f5eb; color:var(--ok); }
 .subtle { color:#536176; font-size:.92rem; margin-top:16px; }
 a { color: var(--primary); text-decoration: none; }
+
+.help-text { display:block; margin-top:6px; font-size:.85rem; color:#536176; }
+.help-text.ok { color: var(--ok); }
+.help-text.error { color: var(--danger); }
+.legal-card p { margin-bottom: 12px; line-height: 1.5; }
