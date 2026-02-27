@@ -25,7 +25,7 @@ Portal externo para **Ruckus SmartZone (vSZ-H 6.1.x)** usando fluxo **Hotspot/WI
 - `src/server.js` — app Express, rotas `/portal`, `/register`, `/login`, `/success`.
 - `src/services/nbi.js` — integração NBI (`LoginAsync/Login` + `Status`).
 - `src/utils/validators.js` — validações CPF, telefone, senha forte com Zod.
-- `migrations/001_init.sql` — tabelas `users`, `lgpd_consents`, `auth_events`.
+- `migrations/001_init.sql` — tabelas `users` e `lgpd_consents`.
 - `schema.sql` — espelho da migração inicial.
 - `docker-compose.yml` — app + postgres + freeradius (opcional).
 
@@ -90,13 +90,13 @@ Form de cadastro com LGPD:
 - bloqueia login quando `users.expires_at < now()`
 - pode renovar validade da conta ao autenticar (`RENEW_ON_LOGIN=true`)
 - chama NBI com `UE-IP` e `UE-MAC` recebidos no redirect
-- registra auditoria em `auth_events` com `raw_params_json`
+- registra auditoria somente em log estruturado (stdout/arquivo)
 
 ---
 
 ## Log detalhado do processo de autenticação
 
-Além da trilha em banco (`auth_events`), a aplicação grava em **stdout** e também em arquivo (`AUTH_LOG_FILE_PATH`, por padrão `./logs/auth-process.log`) uma linha por evento no formato:
+A aplicação grava em **stdout** e também em arquivo (`AUTH_LOG_FILE_PATH`, por padrão `./logs/auth-process.log`) uma linha por evento no formato:
 
 ```text
 2026-02-26T16:00:39.261-03:00,{"level":"error","event":"login_attempt_failed",...}

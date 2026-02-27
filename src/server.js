@@ -277,22 +277,6 @@ app.post('/login', async (req, res) => {
       redirectParams: params
     });
 
-    await pool.query(
-      `INSERT INTO auth_events (user_id, cpf, client_mac, client_ip, ap, ssid, result, reason, raw_params_json)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
-      [
-        user.id,
-        user.cpf,
-        params.client_mac || params['UE-MAC'] || ueMac,
-        params.uip || params.client_ip || params['UE-IP'] || ueIp,
-        params.apip || params.ap,
-        params.ssid,
-        nbiResult.success ? 'success' : 'fail',
-        nbiResult.success ? 'authorized' : JSON.stringify(nbiResult.detail),
-        JSON.stringify(params)
-      ]
-    );
-
     logInfo('login_attempt_nbi_result', {
       ...requestContext,
       user_id: user.id,
@@ -319,20 +303,6 @@ app.post('/login', async (req, res) => {
       401
     );
   } catch (error) {
-    await pool.query(
-      `INSERT INTO auth_events (user_id, cpf, client_mac, client_ip, ap, ssid, result, reason, raw_params_json)
-       VALUES (NULL, $1, $2, $3, $4, $5, 'fail', $6, $7::jsonb)`,
-      [
-        parsed.success ? parsed.data.cpf : cleanDigits(normalizedBody.cpf || ''),
-        params.client_mac || params['UE-MAC'] || null,
-        params.uip || params.client_ip || params['UE-IP'] || null,
-        params.apip || params.ap || null,
-        params.ssid || null,
-        error.message,
-        JSON.stringify(params)
-      ]
-    );
-
     logError('login_attempt_failed', {
       ...requestContext,
       normalized_cpf: parsed.success ? parsed.data.cpf : normalizedBody.cpf,

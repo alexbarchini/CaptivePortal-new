@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 170" role="img" aria-labelledby="title desc">
+  <title id="title">Justiça do Trabalho TRT da 9ª Região (PR)</title>
+  <desc id="desc">Logomarca da Justiça do Trabalho TRT da nona região no Paraná.</desc>
+  <rect width="760" height="170" fill="#ffffff"/>
+  <g transform="translate(18 18)">
+    <circle cx="36" cy="14" r="12" fill="#0d5e8f"/>
+    <path d="M8 34h55v18H28v16h26c11 0 20 9 20 20v18c0 20-16 36-36 36H8v-18h30c10 0 18-8 18-18V90c0-3-2-5-5-5H8z" fill="#0d5e8f"/>
+    <path d="M6 52h22v18H6z" fill="#16a085"/>
+    <path d="M56 30h28v14H56z" fill="#f1c40f"/>
+  </g>
+  <g transform="translate(130 28)" fill="#145f8d" font-family="Arial, Helvetica, sans-serif">
+    <text x="0" y="52" font-size="64" font-weight="500" letter-spacing="1">JUSTIÇA DO TRABALHO</text>
+    <text x="0" y="106" font-size="52" font-weight="700">TRT da 9ª Região (PR)</text>
+  </g>
+</svg>
