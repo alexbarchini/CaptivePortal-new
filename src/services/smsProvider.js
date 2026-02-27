@@ -7,6 +7,18 @@ function safeMessagePreview(message) {
     .slice(0, 24);
 }
 
+function isSmsApiDebugEnabled() {
+  return (process.env.SMS_API_DEBUG || '').toLowerCase() === 'true';
+}
+
+function shouldRetrySmsApiError(error) {
+  const retriableCodes = ['ECONNRESET', 'ENOTFOUND'];
+  const timeoutCode = error?.code === 'ECONNABORTED';
+  const timeoutMessage = /timeout/i.test(String(error?.message || ''));
+
+  return Boolean(timeoutCode || timeoutMessage || retriableCodes.includes(error?.code));
+}
+
 class StubSmsProvider {
   async send(toE164, message) {
     logInfo('sms_stub_send', {
@@ -42,21 +54,53 @@ class ClasseA360SmsProvider {
       message_preview: safeMessagePreview(message)
     });
 
-    const response = await axios.post(this.url, payload.toString(), {
-      timeout: 8000,
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
+    const payloadKeys = Array.from(payload.keys());
+    const maxAttempts = 2;
+    let attempt = 0;
+
+    while (attempt < maxAttempts) {
+      try {
+        const response = await axios.post(this.url, payload.toString(), {
+          timeout: 5000,
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
+        });
+
+        logInfo('sms_api_response', {
+          provider: 'classea360',
+          destination: toE164,
+          status: response.status,
+          response_preview: String(response.data || '').slice(0, 120)
+        });
+
+        return { ok: true, provider: 'classea360' };
+      } catch (error) {
+        const shouldRetry = shouldRetrySmsApiError(error) && attempt < (maxAttempts - 1);
+
+        if (isSmsApiDebugEnabled()) {
+          logError('sms_api_error', {
+            provider: 'classea360',
+            status_code: error?.response?.status,
+            response_headers: error?.response?.headers,
+            response_body: String(error?.response?.data || '').slice(0, 1000),
+            request_payload_keys: payloadKeys,
+            destination: toE164,
+            message_preview: safeMessagePreview(message),
+            code: error?.code,
+            retry_scheduled: shouldRetry,
+            attempt: attempt + 1,
+            error
+          });
+        }
+
+        if (!shouldRetry) {
+          throw error;
+        }
+
+        attempt += 1;
       }
-    });
-
-    logInfo('sms_api_response', {
-      provider: 'classea360',
-      destination: toE164,
-      status: response.status,
-      response_preview: String(response.data || '').slice(0, 120)
-    });
-
-    return { ok: true, provider: 'classea360' };
+    }
   }
 }
 
