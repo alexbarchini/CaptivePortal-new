@@ -39,10 +39,15 @@ docker compose up --build
 
 Serviços:
 - App: `http://localhost:3000`
-- Postgres: `localhost:5432`
+- Postgres: **não exposto externamente** (acesso apenas na rede interna Docker via host `postgres:5432`)
 - FreeRADIUS (opcional): UDP `1812/1813`
 
 A aplicação roda migrações automaticamente ao iniciar.
+
+Administração em desenvolvimento (Postgres):
+- Dentro do container: `docker exec -it captive-portal-db psql -U portal -d captive_portal`
+- Port-forward temporário (quando realmente necessário): `docker compose port postgres 5432` para descobrir uma porta local efêmera e conectar via cliente local em `127.0.0.1:<porta>`. Evite exposição permanente da porta no `docker-compose.yml`.
+
 
 ---
 
