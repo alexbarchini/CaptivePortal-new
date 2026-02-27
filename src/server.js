@@ -90,13 +90,14 @@ async function sendOtpForUser({ userId, phoneE164, reason }) {
   const code = String(Math.floor(100000 + Math.random() * 900000));
   const codeHash = await argon2.hash(code);
 
+  await smsProvider.send(phoneE164, `Seu código de acesso do Portal TRT9 é ${code}. Ele expira em ${Math.ceil(OTP_TTL_SECONDS / 60)} minutos.`);
+
   await pool.query(
     `INSERT INTO otp_codes (user_id, channel, destination, code_hash, expires_at)
      VALUES ($1, 'sms', $2, $3, NOW() + ($4 || ' seconds')::interval)`,
     [userId, phoneE164, codeHash, OTP_TTL_SECONDS]
   );
 
-  await smsProvider.send(phoneE164, `Seu código de acesso do Portal TRT9 é ${code}. Ele expira em ${Math.ceil(OTP_TTL_SECONDS / 60)} minutos.`);
   logInfo('otp_sent', { user_id: userId, destination: phoneE164, reason });
 }
 
@@ -221,10 +222,21 @@ app.post('/register', async (req, res) => {
     );
 
     const lsid = await createLoginSession(user.id, { ...params, stage: 'register', ue: { ip: params['UE-IP'] || params.ue_ip || params.uip, mac: params['UE-MAC'] || params.ue_mac || params.client_mac }, login_password: password });
-    await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'register' });
-
-    logInfo('register_attempt_success', { ...requestContext, user_id: user.id, normalized_cpf: user.cpf_normalizado });
-    return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
+    try {
+      await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'register' });
+      logInfo('register_attempt_success', { ...requestContext, user_id: user.id, normalized_cpf: user.cpf_normalizado });
+      return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
+    } catch (smsError) {
+      logError('register_sms_send_failed', { ...requestContext, user_id: user.id, normalized_cpf: user.cpf_normalizado, error: smsError });
+      return res.status(200).render('verify_sms', {
+        title: 'Verificar SMS',
+        error: 'Seu cadastro foi concluído, mas houve falha no envio do SMS. Clique em "Reenviar código" para tentar novamente.',
+        message: null,
+        lsid,
+        maskedPhone: user.phone_e164.replace(/(\+55\d{2})\d{5}(\d{4})/, '$1*****$2'),
+        resendWaitSeconds: 0
+      });
+    }
   } catch (error) {
     logError('register_attempt_failed', { ...requestContext, error });
     return res.status(500).render('register', { title: 'Cadastro de visitante', error: 'Falha ao cadastrar usuário.', values: normalizedBody, params });
