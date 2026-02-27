@@ -1,0 +1,10 @@
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+
+UPDATE users
+SET expires_at = NOW() + INTERVAL '30 days'
+WHERE expires_at IS NULL;
+
+ALTER TABLE users
+ALTER COLUMN expires_at SET DEFAULT NOW() + INTERVAL '30 days',
+ALTER COLUMN expires_at SET NOT NULL;
