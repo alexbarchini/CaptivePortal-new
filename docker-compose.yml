@@ -32,8 +32,6 @@ services:
       POSTGRES_PASSWORD: portal123
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
 
   freeradius:
     image: freeradius/freeradius-server:latest
