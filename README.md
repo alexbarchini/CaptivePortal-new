@@ -63,6 +63,11 @@ Copie `.env.example` para `.env` e ajuste:
 - `RENEW_ON_LOGIN=true|false`: renova automaticamente a validade da conta em login bem-sucedido (default: `true`).
 - `LOG_TZ`: timezone dos logs estruturados (default: `America/Sao_Paulo`).
 - `AUTH_LOG_FILE_PATH`: caminho do arquivo de log estruturado (default: `./logs/auth-process.log`).
+- `SMS_API_ENABLED=true|false`: habilita envio real via ClasseA 360.
+- `SMS_API_URL`: endpoint da API ClasseA 360 (quando `SMS_API_ENABLED=true`).
+- `SMS_API_USERNAME`, `SMS_API_PASSWORD`, `SMS_API_COD_CARTEIRA`, `SMS_API_COD_FORNECEDOR`: credenciais da ClasseA 360.
+
+No `docker-compose.yml`, o serviço `app` lê variáveis também de `env_file: .env` (além de `environment`).
 
 ---
 
