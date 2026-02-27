@@ -16,11 +16,17 @@
     <section class="card wide">
       <% if (error) { %><div class="alert error"><%= error %></div><% } %>
       <form method="post" action="/register" id="register-form">
+        <label for="fullName">Nome completo</label>
+        <input id="fullName" name="fullName" required value="<%= values.fullName || '' %>" />
+
         <label for="cpf">CPF</label>
         <input id="cpf" name="cpf" required placeholder="000.000.000-00" maxlength="14" value="<%= values.cpf || '' %>" />
 
-        <label for="phone">Telefone</label>
-        <input id="phone" name="phone" required placeholder="DDD + número" value="<%= values.phone || '' %>" />
+        <label for="phone">Telefone (DDD + celular)</label>
+        <input id="phone" name="phone" required placeholder="(41) 9 9999-9999" value="<%= values.phone || '' %>" />
+
+        <label for="email">E-mail</label>
+        <input id="email" name="email" required type="email" placeholder="voce@exemplo.com" value="<%= values.email || '' %>" />
 
         <label for="password">Senha</label>
         <input id="password" name="password" type="password" minlength="8" required />
@@ -31,6 +37,7 @@
         <small id="password-match-hint" class="help-text"></small>
 
         <label class="check"><input type="checkbox" name="accepted_terms" required /> Li e concordo com os <a href="/terms" target="_blank" rel="noopener noreferrer">Termos de Uso</a></label>
+        <label class="check"><input type="checkbox" name="accepted_privacy" required /> Li e concordo com a Política de Privacidade</label>
         <label class="check"><input type="checkbox" name="accepted_processing" required /> Autorizo o tratamento dos dados pessoais para fins de controle de acesso e auditoria (LGPD)</label>
 
         <% Object.keys(params || {}).forEach((key) => { %>
@@ -45,37 +52,37 @@
 
   <script>
     const cpfInput = document.getElementById('cpf');
+    const phoneInput = document.getElementById('phone');
     const passwordInput = document.getElementById('password');
     const confirmPasswordInput = document.getElementById('confirmPassword');
     const passwordMatchHint = document.getElementById('password-match-hint');
 
     cpfInput.addEventListener('input', () => {
       const digits = cpfInput.value.replace(/\D/g, '').slice(0, 11);
-      const formatted = digits
+      cpfInput.value = digits
         .replace(/(\d{3})(\d)/, '$1.$2')
         .replace(/(\d{3})(\d)/, '$1.$2')
         .replace(/(\d{3})(\d{1,2})$/, '$1-$2');
-      cpfInput.value = formatted;
+    });
+
+    phoneInput.addEventListener('input', () => {
+      const digits = phoneInput.value.replace(/\D/g, '').slice(0, 11);
+      phoneInput.value = digits.replace(/(\d{2})(\d)/, '($1) $2').replace(/(\d{5})(\d{1,4})$/, '$1-$2');
     });
 
     function updatePasswordMatchHint() {
       const password = passwordInput.value;
       const confirm = confirmPasswordInput.value;
-
       if (!confirm) {
         passwordMatchHint.textContent = '';
         passwordMatchHint.className = 'help-text';
-        return;
-      }
-
-      if (password === confirm) {
+      } else if (password === confirm) {
         passwordMatchHint.textContent = 'As senhas estão iguais.';
         passwordMatchHint.className = 'help-text ok';
-        return;
+      } else {
+        passwordMatchHint.textContent = 'As senhas ainda não conferem.';
+        passwordMatchHint.className = 'help-text error';
       }
-
-      passwordMatchHint.textContent = 'As senhas ainda não conferem.';
-      passwordMatchHint.className = 'help-text error';
     }
 
     passwordInput.addEventListener('input', updatePasswordMatchHint);

@@ -19,7 +19,7 @@
       <% if (message) { %><div class="alert ok"><%= message %></div><% } %>
       <form method="post" action="/login">
         <label>CPF</label>
-        <input name="cpf" required placeholder="Somente números" />
+        <input name="cpf" required placeholder="000.000.000-00" />
 
         <label>Senha</label>
         <input name="password" type="password" required />
@@ -28,7 +28,7 @@
           <input type="hidden" name="<%= key %>" value="<%= params[key] %>" />
         <% }) %>
 
-        <button type="submit">Conectar</button>
+        <button type="submit">Entrar</button>
       </form>
       <p class="subtle">Não possui cadastro? <a href="/register?<%= new URLSearchParams(params || {}).toString() %>">Criar acesso de visitante</a></p>
     </section>
