@@ -54,7 +54,9 @@ Copie `.env.example` para `.env` e ajuste:
 - `SZ_MANAGEMENT_IP`: IP de management da controladora.
 - `NBI_MOCK=true|false`: modo simulador sem SmartZone.
 - `TERMS_VERSION` e `PRIVACY_VERSION`: versões dos documentos LGPD gravadas no consentimento.
-- `AUTH_LOG_FILE_PATH`: caminho do arquivo de log detalhado do processo de cadastro/login (default: `./logs/auth-process.log`).
+- `USER_ACCOUNT_VALIDITY_DAYS`: validade da conta no portal em dias (default: `30`).
+- `RENEW_ON_LOGIN=true|false`: renova automaticamente a validade da conta em login bem-sucedido (default: `true`).
+- `LOG_TZ`: timezone dos logs estruturados (default: `America/Sao_Paulo`).
 
 ---
 
@@ -79,10 +81,13 @@ Form de cadastro com LGPD:
 - valida CPF (dígitos + DV), telefone e senha forte
 - gera `username_radius = visitante_<cpf>`
 - hash de senha com Argon2
+- define validade da conta em `now() + USER_ACCOUNT_VALIDITY_DAYS`
 - grava consentimento LGPD com timestamp/IP/user-agent e versões dos termos
 
 ### `POST /login`
 - valida CPF/senha no Postgres
+- bloqueia login quando `users.expires_at < now()`
+- pode renovar validade da conta ao autenticar (`RENEW_ON_LOGIN=true`)
 - chama NBI com `UE-IP` e `UE-MAC` recebidos no redirect
 - registra auditoria em `auth_events` com `raw_params_json`
 
@@ -90,20 +95,23 @@ Form de cadastro com LGPD:
 
 ## Log detalhado do processo de autenticação
 
-Além da trilha em banco (`auth_events`), a aplicação grava log estruturado em JSON por linha com:
+Além da trilha em banco (`auth_events`), a aplicação grava em **stdout** uma linha por evento no formato:
+
+```text
+2026-02-26T16:00:39.261-03:00,{"level":"error","event":"login_attempt_failed",...}
+```
+
+Regras do formato:
+- timestamp ISO-8601 com offset do timezone configurado (`LOG_TZ`) no início da linha
+- vírgula após o timestamp
+- JSON válido em linha única contendo `level`, `event` e payload
+- sem chave `timestamp` dentro do JSON
+
+Campos típicos no JSON:
 - usuário/CPF informado
-- horário (`timestamp`)
 - origem da requisição (`request_ip`, `user_agent`)
 - etapa do fluxo (`login_attempt_started`, `login_password_verified`, `login_attempt_nbi_result`, etc.)
 - motivo do erro e stacktrace quando houver
-
-Local padrão do arquivo:
-
-```text
-./logs/auth-process.log
-```
-
-Para alterar o local, configure `AUTH_LOG_FILE_PATH` no `.env`.
 
 ---
 

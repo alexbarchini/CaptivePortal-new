@@ -8,12 +8,15 @@ const argon2 = require('argon2');
 
 const { pool } = require('./db');
 const { runMigrations } = require('./db/migrate');
-const { registerSchema, loginSchema } = require('./utils/validators');
+const { registerSchema, loginSchema, cleanDigits } = require('./utils/validators');
 const { loginAndPoll } = require('./services/nbi');
-const { LOG_PATH, logInfo, logError } = require('./utils/logger');
+const { logInfo, logError, LOG_TZ } = require('./utils/logger');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
+const USER_ACCOUNT_VALIDITY_DAYS = Number(process.env.USER_ACCOUNT_VALIDITY_DAYS || 30);
+const RENEW_ON_LOGIN = (process.env.RENEW_ON_LOGIN || 'true').toLowerCase() !== 'false';
+const SESSION_MAX_AGE_MS = USER_ACCOUNT_VALIDITY_DAYS * 24 * 60 * 60 * 1000;
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
@@ -22,6 +25,16 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 app.use(cookieParser());
+app.use((req, res, next) => {
+  if (req.cookies?.portal_session) {
+    res.cookie('portal_session', req.cookies.portal_session, {
+      maxAge: SESSION_MAX_AGE_MS,
+      httpOnly: true,
+      sameSite: 'lax'
+    });
+  }
+  next();
+});
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
 const authLimiter = rateLimit({
@@ -35,7 +48,7 @@ app.use('/register', authLimiter);
 app.use('/login', authLimiter);
 
 function getRedirectParams(req) {
-  return { ...req.query, ...req.body };
+  return normalizeBodyFields({ ...req.query, ...req.body });
 }
 
 function getOriginalUrl(params) {
@@ -49,18 +62,22 @@ function normalizeBodyFields(body = {}) {
 }
 
 function sanitizeParams(params = {}) {
-  const sanitized = { ...params };
+  const sanitized = normalizeBodyFields(params);
   delete sanitized.password;
   delete sanitized.confirmPassword;
+  if (sanitized.cpf) {
+    sanitized.cpf = cleanDigits(sanitized.cpf);
+  }
   return sanitized;
 }
 
 class AuthFlowError extends Error {
-  constructor(message, userMessage, statusCode = 401) {
+  constructor(message, userMessage, statusCode = 401, reason = null) {
     super(message);
     this.name = 'AuthFlowError';
     this.userMessage = userMessage;
     this.statusCode = statusCode;
+    this.reason = reason;
   }
 }
 
@@ -92,7 +109,7 @@ app.post('/register', async (req, res) => {
   const params = getRedirectParams(req);
   const normalizedBody = normalizeBodyFields(req.body);
   const requestContext = {
-    cpf: normalizedBody.cpf,
+    cpf: cleanDigits(normalizedBody.cpf || ''),
     request_ip: req.ip,
     user_agent: req.get('user-agent') || '',
     params: sanitizeParams(params)
@@ -119,15 +136,16 @@ app.post('/register', async (req, res) => {
   try {
     const passwordHash = await argon2.hash(password);
     const userInsert = await pool.query(
-      `INSERT INTO users (cpf, phone, username_radius, password_hash, is_active)
-       VALUES ($1, $2, $3, $4, true)
+      `INSERT INTO users (cpf, phone, username_radius, password_hash, is_active, expires_at)
+       VALUES ($1, $2, $3, $4, true, NOW() + ($5 || ' days')::interval)
        ON CONFLICT (cpf) DO UPDATE SET
         phone = EXCLUDED.phone,
         username_radius = EXCLUDED.username_radius,
         password_hash = EXCLUDED.password_hash,
+        expires_at = NOW() + ($5 || ' days')::interval,
         updated_at = NOW()
        RETURNING id, cpf`,
-      [cpf, phone, usernameRadius, passwordHash]
+      [cpf, phone, usernameRadius, passwordHash, USER_ACCOUNT_VALIDITY_DAYS]
     );
 
     const user = userInsert.rows[0];
@@ -175,7 +193,7 @@ app.post('/login', async (req, res) => {
   const params = getRedirectParams(req);
   const normalizedBody = normalizeBodyFields(req.body);
   const requestContext = {
-    cpf: normalizedBody.cpf,
+    cpf: cleanDigits(normalizedBody.cpf || ''),
     request_ip: req.ip,
     user_agent: req.get('user-agent') || '',
     params: sanitizeParams(params)
@@ -200,6 +218,7 @@ app.post('/login', async (req, res) => {
   try {
     const query = await pool.query(
       `SELECT id, cpf, username_radius, password_hash, is_active
+             , expires_at
        FROM users
        WHERE regexp_replace(cpf, '\\D', '', 'g') = $1`,
       [cpf]
@@ -213,6 +232,10 @@ app.post('/login', async (req, res) => {
       throw new AuthFlowError('Usuário inativo.', 'Usuário inativo. Entre em contato com o suporte.');
     }
 
+    if (new Date(user.expires_at) < new Date()) {
+      throw new AuthFlowError('Conta expirada para o CPF informado.', 'Conta expirada. Faça um novo cadastro.', 401, 'account_expired');
+    }
+
     const ok = await argon2.verify(user.password_hash, password);
     if (!ok) {
       throw new AuthFlowError('Falha na verificação do hash Argon2 para o usuário.', 'CPF ou senha inválidos.');
@@ -224,6 +247,16 @@ app.post('/login', async (req, res) => {
       normalized_cpf: user.cpf,
       username_radius: user.username_radius
     });
+
+    if (RENEW_ON_LOGIN) {
+      await pool.query(
+        `UPDATE users
+         SET expires_at = NOW() + ($2 || ' days')::interval,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [user.id, USER_ACCOUNT_VALIDITY_DAYS]
+      );
+    }
 
     const ueIp = params['UE-IP'] || params.ue_ip || params.uip;
     const ueMac = params['UE-MAC'] || params.ue_mac || params.client_mac;
@@ -272,6 +305,11 @@ app.post('/login', async (req, res) => {
     });
 
     if (nbiResult.success) {
+      res.cookie('portal_session', String(user.id), {
+        maxAge: SESSION_MAX_AGE_MS,
+        httpOnly: true,
+        sameSite: 'lax'
+      });
       return res.redirect(getOriginalUrl(params));
     }
 
@@ -285,7 +323,7 @@ app.post('/login', async (req, res) => {
       `INSERT INTO auth_events (user_id, cpf, client_mac, client_ip, ap, ssid, result, reason, raw_params_json)
        VALUES (NULL, $1, $2, $3, $4, $5, 'fail', $6, $7::jsonb)`,
       [
-        parsed.success ? parsed.data.cpf : req.body.cpf,
+        parsed.success ? parsed.data.cpf : cleanDigits(normalizedBody.cpf || ''),
         params.client_mac || params['UE-MAC'] || null,
         params.uip || params.client_ip || params['UE-IP'] || null,
         params.apip || params.ap || null,
@@ -298,6 +336,7 @@ app.post('/login', async (req, res) => {
     logError('login_attempt_failed', {
       ...requestContext,
       normalized_cpf: parsed.success ? parsed.data.cpf : normalizedBody.cpf,
+      reason: error.reason || undefined,
       error
     });
 
@@ -323,7 +362,7 @@ async function bootstrap() {
   await runMigrations(pool);
   app.listen(PORT, () => {
     console.log(`Portal online na porta ${PORT}`);
-    console.log(`Log de autenticação em: ${LOG_PATH}`);
+    console.log(`Log estruturado em stdout com timezone ${LOG_TZ}`);
   });
 }
 
