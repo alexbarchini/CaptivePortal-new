@@ -55,7 +55,6 @@ const registerSchema = z.object({
   password: z.string().min(8, 'A senha deve ter no mínimo 8 caracteres.'),
   confirmPassword: z.string(),
   accepted_terms: z.literal('on', { errorMap: () => ({ message: 'Aceite os Termos de Uso.' }) }),
-  accepted_privacy: z.literal('on', { errorMap: () => ({ message: 'Aceite a Política de Privacidade.' }) }),
   accepted_processing: z.literal('on', { errorMap: () => ({ message: 'Autorize o tratamento de dados.' }) })
 }).refine((data) => data.password === data.confirmPassword, {
   message: 'As senhas não conferem.',
