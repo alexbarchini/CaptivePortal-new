@@ -7,6 +7,10 @@ function safeMessagePreview(message) {
     .slice(0, 24);
 }
 
+function normalizePhoneNumber(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
 function isSmsApiDebugEnabled() {
   return (process.env.SMS_API_DEBUG || '').toLowerCase() === 'true';
 }
@@ -19,14 +23,6 @@ function shouldRetrySmsApiError(error) {
   return Boolean(timeoutCode || timeoutMessage || retriableCodes.includes(error?.code));
 }
 
-function maskSecretPrefix(value) {
-  const secret = String(value || '');
-  if (!secret) {
-    return undefined;
-  }
-
-  return `${secret.slice(0, 3)}***`;
-}
 
 function serializeResponseBody(responseBody) {
   if (responseBody == null) {
@@ -42,6 +38,10 @@ function serializeResponseBody(responseBody) {
   } catch (error) {
     return String(responseBody);
   }
+}
+
+function truncateForLog(value, maxLength = 2000) {
+  return String(value || '').slice(0, maxLength);
 }
 
 class StubSmsProvider {
@@ -64,40 +64,44 @@ class ClasseA360SmsProvider {
   }
 
   async send(toE164, message) {
-    const payload = new URLSearchParams({
-      telefone: toE164,
-      texto: message,
-      login: this.username,
-      senha: this.password,
-      cod_carteira: this.carteiraCode,
-      cod_fornecedor: this.providerCode
-    });
-    const requestContentType = 'application/x-www-form-urlencoded';
+    const destination = normalizePhoneNumber(toE164);
+    const payload = {
+      codigo_carteira: this.carteiraCode,
+      codigo_fornecedor: this.providerCode,
+      envios: [
+        {
+          numero: destination,
+          mensagem: message
+        }
+      ]
+    };
+    const requestContentType = 'application/json';
 
     logInfo('sms_api_send', {
       provider: 'classea360',
-      destination: toE164,
+      destination,
       message_preview: safeMessagePreview(message)
     });
 
-    const payloadKeys = Array.from(payload.keys());
     const maxAttempts = 2;
     let attempt = 0;
 
     while (attempt < maxAttempts) {
       try {
-        const response = await axios.post(this.url, payload.toString(), {
+        const response = await axios.post(this.url, payload, {
           timeout: 5000,
+          auth: {
+            username: this.username,
+            password: this.password
+          },
           headers: {
             'Content-Type': requestContentType
           }
         });
 
         logInfo('sms_api_response', {
-          provider: 'classea360',
-          destination: toE164,
-          status: response.status,
-          response_preview: String(response.data || '').slice(0, 120)
+          status_code: response.status,
+          response_body: truncateForLog(serializeResponseBody(response.data))
         });
 
         return { ok: true, provider: 'classea360' };
@@ -105,26 +109,14 @@ class ClasseA360SmsProvider {
         const shouldRetry = shouldRetrySmsApiError(error) && attempt < (maxAttempts - 1);
 
         logError('sms_api_error', {
-          provider: 'classea360',
-          status: error?.response?.status,
-          response_headers: error?.response?.headers,
-          response_body: serializeResponseBody(error?.response?.data).slice(0, 2000),
-          request_content_type: requestContentType,
-          request_payload_keys: payloadKeys,
-          destination: toE164,
-          message_preview: safeMessagePreview(message),
-          username_preview: maskSecretPrefix(this.username),
-          password_preview: maskSecretPrefix(this.password),
-          carteira_preview: maskSecretPrefix(this.carteiraCode),
-          code: error?.code,
-          retry_scheduled: shouldRetry,
-          attempt: attempt + 1
+          status_code: error?.response?.status,
+          response_body: truncateForLog(serializeResponseBody(error?.response?.data))
         });
 
         if (isSmsApiDebugEnabled()) {
           logError('sms_api_error_debug', {
             provider: 'classea360',
-            destination: toE164,
+            destination,
             code: error?.code,
             retry_scheduled: shouldRetry,
             attempt: attempt + 1,
