@@ -1,4 +1,16 @@
+const fs = require('fs');
+const path = require('path');
+
 const LOG_TZ = process.env.LOG_TZ || 'America/Sao_Paulo';
+const AUTH_LOG_FILE_PATH = process.env.AUTH_LOG_FILE_PATH || './logs/auth-process.log';
+
+function ensureLogDirectory(logFilePath) {
+  if (!logFilePath) return;
+  const resolvedPath = path.resolve(logFilePath);
+  fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
+}
+
+ensureLogDirectory(AUTH_LOG_FILE_PATH);
 
 function getTimestampInZone(timeZone) {
   const date = new Date();
@@ -44,7 +56,12 @@ function logger(level, event, payloadObject = {}) {
       ...payloadObject
     };
     delete entry.timestamp;
-    process.stdout.write(`${ts},${JSON.stringify(entry)}\n`);
+    const line = `${ts},${JSON.stringify(entry)}\n`;
+    process.stdout.write(line);
+
+    if (AUTH_LOG_FILE_PATH) {
+      fs.appendFileSync(path.resolve(AUTH_LOG_FILE_PATH), line, 'utf8');
+    }
   } catch (error) {
     console.error('Falha ao escrever log de autenticação:', error);
   }
@@ -65,5 +82,6 @@ module.exports = {
   logger,
   logInfo,
   logError,
-  LOG_TZ
+  LOG_TZ,
+  AUTH_LOG_FILE_PATH
 };

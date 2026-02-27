@@ -57,6 +57,7 @@ Copie `.env.example` para `.env` e ajuste:
 - `USER_ACCOUNT_VALIDITY_DAYS`: validade da conta no portal em dias (default: `30`).
 - `RENEW_ON_LOGIN=true|false`: renova automaticamente a validade da conta em login bem-sucedido (default: `true`).
 - `LOG_TZ`: timezone dos logs estruturados (default: `America/Sao_Paulo`).
+- `AUTH_LOG_FILE_PATH`: caminho do arquivo de log estruturado (default: `./logs/auth-process.log`).
 
 ---
 
@@ -95,7 +96,7 @@ Form de cadastro com LGPD:
 
 ## Log detalhado do processo de autenticação
 
-Além da trilha em banco (`auth_events`), a aplicação grava em **stdout** uma linha por evento no formato:
+Além da trilha em banco (`auth_events`), a aplicação grava em **stdout** e também em arquivo (`AUTH_LOG_FILE_PATH`, por padrão `./logs/auth-process.log`) uma linha por evento no formato:
 
 ```text
 2026-02-26T16:00:39.261-03:00,{"level":"error","event":"login_attempt_failed",...}
@@ -112,6 +113,10 @@ Campos típicos no JSON:
 - origem da requisição (`request_ip`, `user_agent`)
 - etapa do fluxo (`login_attempt_started`, `login_password_verified`, `login_attempt_nbi_result`, etc.)
 - motivo do erro e stacktrace quando houver
+
+Como acompanhar logs:
+- `docker compose logs -f app` para acompanhar stdout da aplicação.
+- arquivo persistente no host em `./logs/auth-process.log` (montado via volume `./logs:/app/logs`).
 
 ---
 

@@ -10,7 +10,7 @@ const { pool } = require('./db');
 const { runMigrations } = require('./db/migrate');
 const { registerSchema, loginSchema, cleanDigits } = require('./utils/validators');
 const { loginAndPoll } = require('./services/nbi');
-const { logInfo, logError, LOG_TZ } = require('./utils/logger');
+const { logInfo, logError, LOG_TZ, AUTH_LOG_FILE_PATH } = require('./utils/logger');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -341,9 +341,7 @@ app.post('/login', async (req, res) => {
     });
 
     const statusCode = error instanceof AuthFlowError ? error.statusCode : 401;
-    const userMessage = error instanceof AuthFlowError
-      ? error.userMessage
-      : 'CPF ou senha inválidos.';
+    const userMessage = 'Credenciais inválidas.';
 
     return res.status(statusCode).render('portal', {
       title: 'Portal Visitantes TRT9',
@@ -363,6 +361,9 @@ async function bootstrap() {
   app.listen(PORT, () => {
     console.log(`Portal online na porta ${PORT}`);
     console.log(`Log estruturado em stdout com timezone ${LOG_TZ}`);
+    if (AUTH_LOG_FILE_PATH) {
+      console.log(`Log estruturado também em arquivo: ${AUTH_LOG_FILE_PATH}`);
+    }
   });
 }
 
