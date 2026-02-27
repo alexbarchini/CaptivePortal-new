@@ -22,20 +22,3 @@ CREATE TABLE IF NOT EXISTS lgpd_consents (
   ip VARCHAR(64),
   user_agent TEXT
 );
-
-CREATE TABLE IF NOT EXISTS auth_events (
-  id BIGSERIAL PRIMARY KEY,
-  user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
-  cpf VARCHAR(11),
-  client_mac VARCHAR(64),
-  client_ip VARCHAR(64),
-  ap VARCHAR(64),
-  ssid VARCHAR(128),
-  result VARCHAR(16) NOT NULL,
-  reason TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  raw_params_json JSONB NOT NULL DEFAULT '{}'::jsonb
-);
-
-CREATE INDEX IF NOT EXISTS idx_auth_events_created_at ON auth_events(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_auth_events_cpf ON auth_events(cpf);
