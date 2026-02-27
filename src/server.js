@@ -378,7 +378,14 @@ app.post('/verify/sms', async (req, res) => {
     const ctx = session.ctx_json || {};
     const ueIp = ctx.ue?.ip;
     const ueMac = ctx.ue?.mac;
-    if (!ueIp || !ueMac) throw new AuthFlowError('Parâmetros WISPr ausentes.', 'Código válido, mas faltam parâmetros de rede.', 400);
+    if (!ueIp || !ueMac) {
+      throw new AuthFlowError(
+        'Parâmetros WISPr ausentes.',
+        'Código confirmado com sucesso.',
+        400,
+        'missing_wispr_params'
+      );
+    }
 
     const nbiResult = await loginAndPoll({
       ueIp,
@@ -399,10 +406,16 @@ app.post('/verify/sms', async (req, res) => {
     return res.redirect(getOriginalUrl(ctx));
   } catch (error) {
     logError('otp_verify_error', { lsid, error });
+
+    const isMissingWispr = error instanceof AuthFlowError && error.reason === 'missing_wispr_params';
+    const errorMessage = isMissingWispr
+      ? 'Houve um problema com os parâmetros WISPr da rede. Tente conectar novamente pelo portal captive.'
+      : 'Código inválido ou expirado.';
+
     return res.status(error.statusCode || 401).render('verify_sms', {
       title: 'Verificar SMS',
-      error: 'Código inválido ou expirado.',
-      message: null,
+      error: errorMessage,
+      message: isMissingWispr ? error.userMessage : null,
       lsid,
       maskedPhone: '',
       resendWaitSeconds: OTP_RESEND_COOLDOWN_SECONDS
