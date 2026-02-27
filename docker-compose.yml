@@ -2,6 +2,8 @@ services:
   app:
     build: .
     container_name: captive-portal-app
+    env_file:
+      - .env
     environment:
       PORT: 3000
       DB_HOST: postgres
