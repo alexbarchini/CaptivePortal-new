@@ -86,7 +86,7 @@ async function createLoginSession(userId, ctxJson) {
   return lsid;
 }
 
-async function sendOtpForUser({ userId, phoneE164, reason }) {
+async function sendOtpForUser({ userId, phoneE164, reason, cpfOptional }) {
   const code = String(Math.floor(100000 + Math.random() * 900000));
   const codeHash = await argon2.hash(code);
 
@@ -96,8 +96,18 @@ async function sendOtpForUser({ userId, phoneE164, reason }) {
     [userId, phoneE164, codeHash, OTP_TTL_SECONDS]
   );
 
-  await smsProvider.send(phoneE164, `Seu código de acesso do Portal TRT9 é ${code}. Ele expira em ${Math.ceil(OTP_TTL_SECONDS / 60)} minutos.`);
-  logInfo('otp_sent', { user_id: userId, destination: phoneE164, reason });
+  try {
+    await smsProvider.sendSms(phoneE164, `TRT9: seu código é ${code}. Válido por 5 minutos.`, cpfOptional);
+    logInfo('otp_sent', { user_id: userId, destination: phoneE164, reason });
+  } catch (error) {
+    logError('otp_send_failed', {
+      user_id: userId,
+      destination: phoneE164,
+      reason,
+      error: new Error('Não foi possível enviar SMS')
+    });
+    throw new AuthFlowError('Falha ao enviar OTP por SMS.', 'Não foi possível enviar SMS', 503, 'sms_send_failed');
+  }
 }
 
 async function getLatestOtp(userId) {
@@ -221,13 +231,13 @@ app.post('/register', async (req, res) => {
     );
 
     const lsid = await createLoginSession(user.id, { ...params, stage: 'register', ue: { ip: params['UE-IP'] || params.ue_ip || params.uip, mac: params['UE-MAC'] || params.ue_mac || params.client_mac }, login_password: password });
-    await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'register' });
+    await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'register', cpfOptional: user.cpf_normalizado });
 
     logInfo('register_attempt_success', { ...requestContext, user_id: user.id, normalized_cpf: user.cpf_normalizado });
     return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
   } catch (error) {
     logError('register_attempt_failed', { ...requestContext, error });
-    return res.status(500).render('register', { title: 'Cadastro de visitante', error: 'Falha ao cadastrar usuário.', values: normalizedBody, params });
+    return res.status(error.statusCode || 500).render('register', { title: 'Cadastro de visitante', error: error.userMessage || 'Falha ao cadastrar usuário.', values: normalizedBody, params });
   }
 });
 
@@ -269,11 +279,14 @@ app.post('/login', async (req, res) => {
       login_password: password
     });
 
-    await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'login' });
+    await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'login', cpfOptional: user.cpf_normalizado });
 
     return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
   } catch (error) {
     logError('login_attempt_failed', { ...requestContext, reason: error.reason || undefined, error });
+    if (error instanceof AuthFlowError && error.reason === 'sms_send_failed') {
+      return res.status(error.statusCode || 503).render('portal', { title: 'Portal Visitantes TRT9', error: 'Não foi possível enviar SMS', message: null, params });
+    }
     return genericInvalidCredentials(res, params, error.statusCode || 401);
   }
 });
@@ -304,8 +317,19 @@ app.post('/verify/sms/resend', async (req, res) => {
     });
   }
 
-  await sendOtpForUser({ userId: session.user_id, phoneE164: session.phone_e164, reason: 'resend' });
-  return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
+  try {
+    await sendOtpForUser({ userId: session.user_id, phoneE164: session.phone_e164, reason: 'resend' });
+    return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
+  } catch (error) {
+    return res.status(error.statusCode || 503).render('verify_sms', {
+      title: 'Verificar SMS',
+      error: error.userMessage || 'Não foi possível enviar SMS',
+      message: null,
+      lsid,
+      maskedPhone: session.phone_e164.replace(/(\+55\d{2})\d{5}(\d{4})/, '$1*****$2'),
+      resendWaitSeconds: OTP_RESEND_COOLDOWN_SECONDS
+    });
+  }
 });
 
 app.post('/verify/sms', async (req, res) => {
@@ -397,6 +421,26 @@ app.post('/verify/sms', async (req, res) => {
     });
   }
 });
+
+
+if (process.env.NODE_ENV === 'development') {
+  app.post('/debug/sms', async (req, res) => {
+    const destination = String(req.body.to || '');
+    const cpf = String(req.body.cpf || '');
+    const message = String(req.body.message || 'TRT9: SMS de homologação.');
+
+    try {
+      await smsProvider.sendSms(destination, message, cpf || undefined);
+      return res.json({ ok: true, message: 'SMS enviado para homologação.' });
+    } catch (error) {
+      logError('debug_sms_failed', {
+        destination,
+        error: new Error('Falha ao enviar SMS de homologação')
+      });
+      return res.status(500).json({ ok: false, error: 'Não foi possível enviar SMS' });
+    }
+  });
+}
 
 app.get('/terms', (_, res) => {
   res.render('terms', { title: 'Termos de Uso' });

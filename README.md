@@ -58,6 +58,20 @@ Copie `.env.example` para `.env` e ajuste:
 - `RENEW_ON_LOGIN=true|false`: renova automaticamente a validade da conta em login bem-sucedido (default: `true`).
 - `LOG_TZ`: timezone dos logs estruturados (default: `America/Sao_Paulo`).
 - `AUTH_LOG_FILE_PATH`: caminho do arquivo de log estruturado (default: `./logs/auth-process.log`).
+- `SMS_API_ENABLED=true|false`: habilita integração real com ClasseA 360; quando `false` usa mock local.
+- `SMS_API_URL`: endpoint do envio SMS (default: `https://api360.classeaservicos.com.br/api/send.php`).
+- `SMS_API_USERNAME` / `SMS_API_PASSWORD`: credenciais da API.
+- `SMS_API_COD_CARTEIRA`: código da carteira da ClasseA 360.
+- `SMS_API_COD_FORNECEDOR`: identificador do fornecedor (default: `classea_token`).
+
+Campos de payload (opcional, para homologação sem documentação final):
+- `SMS_API_FIELD_USERNAME` (default: `username`)
+- `SMS_API_FIELD_PASSWORD` (default: `password`)
+- `SMS_API_FIELD_TO` (default: `to`)
+- `SMS_API_FIELD_MESSAGE` (default: `message`)
+- `SMS_API_FIELD_COD_CARTEIRA` (default: `cod_carteira`)
+- `SMS_API_FIELD_COD_FORNECEDOR` (default: `cod_fornecedor`)
+- `SMS_API_FIELD_CPF` (default: `cpf`)
 
 ---
 
@@ -89,8 +103,21 @@ Form de cadastro com LGPD:
 - valida CPF/senha no Postgres
 - bloqueia login quando `users.expires_at < now()`
 - pode renovar validade da conta ao autenticar (`RENEW_ON_LOGIN=true`)
+- gera OTP e envia SMS (`TRT9: seu código é XXXXXX. Válido por 5 minutos.`); se o envio falhar, o login não é liberado
 - chama NBI com `UE-IP` e `UE-MAC` recebidos no redirect
 - registra auditoria somente em log estruturado (stdout/arquivo)
+
+### `POST /debug/sms` (somente `NODE_ENV=development`)
+Endpoint de homologação para validar envio SMS manual.
+
+Body JSON ou form-urlencoded:
+- `to`: telefone destino (aceita formato nacional como `(41) 99999-9999` ou E.164)
+- `message`: texto (opcional)
+- `cpf`: CPF opcional enviado no payload da API
+
+Retorno:
+- `200` quando o provider aceita o envio
+- `500` com mensagem `Não foi possível enviar SMS` em falha
 
 ---
 
