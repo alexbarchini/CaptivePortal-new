@@ -19,6 +19,31 @@ function shouldRetrySmsApiError(error) {
   return Boolean(timeoutCode || timeoutMessage || retriableCodes.includes(error?.code));
 }
 
+function maskSecretPrefix(value) {
+  const secret = String(value || '');
+  if (!secret) {
+    return undefined;
+  }
+
+  return `${secret.slice(0, 3)}***`;
+}
+
+function serializeResponseBody(responseBody) {
+  if (responseBody == null) {
+    return '';
+  }
+
+  if (typeof responseBody === 'string') {
+    return responseBody;
+  }
+
+  try {
+    return JSON.stringify(responseBody);
+  } catch (error) {
+    return String(responseBody);
+  }
+}
+
 class StubSmsProvider {
   async send(toE164, message) {
     logInfo('sms_stub_send', {
@@ -47,6 +72,7 @@ class ClasseA360SmsProvider {
       cod_carteira: this.carteiraCode,
       cod_fornecedor: this.providerCode
     });
+    const requestContentType = 'application/x-www-form-urlencoded';
 
     logInfo('sms_api_send', {
       provider: 'classea360',
@@ -63,7 +89,7 @@ class ClasseA360SmsProvider {
         const response = await axios.post(this.url, payload.toString(), {
           timeout: 5000,
           headers: {
-            'Content-Type': 'application/x-www-form-urlencoded'
+            'Content-Type': requestContentType
           }
         });
 
@@ -78,19 +104,31 @@ class ClasseA360SmsProvider {
       } catch (error) {
         const shouldRetry = shouldRetrySmsApiError(error) && attempt < (maxAttempts - 1);
 
+        logError('sms_api_error', {
+          provider: 'classea360',
+          status: error?.response?.status,
+          response_headers: error?.response?.headers,
+          response_body: serializeResponseBody(error?.response?.data).slice(0, 2000),
+          request_content_type: requestContentType,
+          request_payload_keys: payloadKeys,
+          destination: toE164,
+          message_preview: safeMessagePreview(message),
+          username_preview: maskSecretPrefix(this.username),
+          password_preview: maskSecretPrefix(this.password),
+          carteira_preview: maskSecretPrefix(this.carteiraCode),
+          code: error?.code,
+          retry_scheduled: shouldRetry,
+          attempt: attempt + 1
+        });
+
         if (isSmsApiDebugEnabled()) {
-          logError('sms_api_error', {
+          logError('sms_api_error_debug', {
             provider: 'classea360',
-            status_code: error?.response?.status,
-            response_headers: error?.response?.headers,
-            response_body: String(error?.response?.data || '').slice(0, 1000),
-            request_payload_keys: payloadKeys,
             destination: toE164,
-            message_preview: safeMessagePreview(message),
             code: error?.code,
             retry_scheduled: shouldRetry,
             attempt: attempt + 1,
-            error
+            error_message: error?.message
           });
         }
 
