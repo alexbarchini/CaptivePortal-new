@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= title %></title>
+  <link rel="stylesheet" href="/public/style.css" />
+</head>
+<body>
+  <header class="header">
+    <div class="logo-wrap">
+      <img src="/public/trt9-logo.jpg" alt="Justiça do Trabalho TRT da 9ª Região" class="logo"/>
+    </div>
+  </header>
+  <main class="container">
+    <section class="card">
+      <h2>Confirmar código SMS</h2>
+      <p class="subtle">Enviamos um código para <strong><%= maskedPhone %></strong>.</p>
+      <% if (error) { %><div class="alert error"><%= error %></div><% } %>
+      <% if (message) { %><div class="alert ok"><%= message %></div><% } %>
+
+      <form method="post" action="/verify/sms">
+        <input type="hidden" name="lsid" value="<%= lsid %>" />
+        <label for="code">Código (6 dígitos)</label>
+        <input id="code" name="code" maxlength="6" required placeholder="000000" />
+        <button type="submit">Confirmar</button>
+      </form>
+
+      <form method="post" action="/verify/sms/resend">
+        <input type="hidden" name="lsid" value="<%= lsid %>" />
+        <button type="submit" id="resend-btn" <%= resendWaitSeconds > 0 ? 'disabled' : '' %>>Reenviar código</button>
+      </form>
+      <p class="subtle" id="cooldown"><%= resendWaitSeconds > 0 ? ('Reenvio disponível em ' + resendWaitSeconds + 's.') : '' %></p>
+    </section>
+  </main>
+
+  <script>
+    const cooldownEl = document.getElementById('cooldown');
+    const resendBtn = document.getElementById('resend-btn');
+    let seconds = Number(<%= Number(resendWaitSeconds || 0) %>);
+
+    function tick() {
+      if (seconds <= 0) {
+        resendBtn.disabled = false;
+        cooldownEl.textContent = '';
+        return;
+      }
+      resendBtn.disabled = true;
+      cooldownEl.textContent = `Reenvio disponível em ${seconds}s.`;
+      seconds -= 1;
+      setTimeout(tick, 1000);
+    }
+
+    tick();
+  </script>
+</body>
+</html>
