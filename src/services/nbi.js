@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { logInfo } = require('../utils/logger');
 
 const REQUEST_TIMEOUT_MS = 5000;
 
@@ -42,7 +43,7 @@ function isFail(data) {
   return (code && code !== '0') || msg.includes('fail') || msg.includes('reject') || msg.includes('error');
 }
 
-async function loginAndPoll({ ueIp, ueMac, ueUsername, uePassword, redirectParams }) {
+async function loginAndPoll({ ueIp, ueMac, ueProxy = '0', ueUsername, uePassword, redirectParams }) {
   if (process.env.NBI_MOCK === 'true' || redirectParams.mock === '1') {
     return { success: true, mode: 'mock', detail: { message: 'NBI mock habilitado.' } };
   }
@@ -53,12 +54,13 @@ async function loginAndPoll({ ueIp, ueMac, ueUsername, uePassword, redirectParam
     RequestType: process.env.NBI_LOGIN_TYPE || 'LoginAsync',
     'UE-IP': ueIp,
     'UE-MAC': ueMac,
-    'UE-Proxy': '0',
+    'UE-Proxy': ueProxy,
     'UE-Username': ueUsername,
     'UE-Password': uePassword
   };
 
   const loginResponse = await doPost(endpoint, loginPayload);
+  logInfo('nbi_login_response', { response_code: String(loginResponse?.ResponseCode ?? ''), request_type: loginPayload.RequestType });
   if (isSuccess(loginResponse) && loginPayload.RequestType === 'Login') {
     return { success: true, mode: 'direct', detail: loginResponse };
   }
@@ -79,6 +81,7 @@ async function loginAndPoll({ ueIp, ueMac, ueUsername, uePassword, redirectParam
       'UE-MAC': ueMac
     };
     const statusResponse = await doPost(endpoint, statusPayload);
+    logInfo('nbi_status_response', { response_code: String(statusResponse?.ResponseCode ?? '') });
     if (isSuccess(statusResponse)) {
       return { success: true, mode: 'status', detail: statusResponse };
     }

@@ -58,7 +58,19 @@ app.use('/login', authLimiter);
 app.use('/verify/sms', verifyLimiter);
 
 function getRedirectParams(req) {
-  return normalizeBodyFields({ ...req.query, ...req.body });
+  const normalized = normalizeBodyFields({ ...req.query, ...req.body });
+  const rawCtx = normalized.ctx || normalized.redirect_ctx;
+  if (rawCtx) {
+    try {
+      const decoded = JSON.parse(Buffer.from(String(rawCtx), 'base64url').toString('utf8'));
+      if (decoded && typeof decoded === 'object') {
+        return normalizeBodyFields({ ...decoded, ...normalized });
+      }
+    } catch (_) {
+      // segue fluxo normal se ctx estiver inválido
+    }
+  }
+  return normalized;
 }
 function getOriginalUrl(params) { return params.url || params.orig_url || '/success'; }
 function normalizeBodyFields(body = {}) {
@@ -72,8 +84,25 @@ function sanitizeParams(params = {}) {
   if (sanitized.cpf) sanitized.cpf = cleanDigits(sanitized.cpf);
   return sanitized;
 }
+function buildRedirectCtx(params = {}) {
+  return Buffer.from(JSON.stringify(normalizeBodyFields(params)), 'utf8').toString('base64url');
+}
+function maskMac(mac = '') {
+  const value = String(mac || '');
+  if (!value) return '';
+  const compact = value.replace(/[^a-fA-F0-9]/g, '').toUpperCase();
+  if (compact.length < 6) return '***';
+  return `${compact.slice(0, 2)}:**:**:**:${compact.slice(-2)}`;
+}
+function resolveWisprParams(params = {}) {
+  const userIp = params.uip || params['UE-IP'] || params.client_ip;
+  const userMac = params.client_mac || params['UE-MAC'];
+  const proxy = params.proxy || '0';
+  const nbiIP = params.nbiIP;
+  return { userIp, userMac, proxy, nbiIP };
+}
 function genericInvalidCredentials(res, params, statusCode = 401) {
-  return res.status(statusCode).render('portal', { title: 'Portal Visitantes TRT9', error: 'Credenciais inválidas.', message: null, params });
+  return res.status(statusCode).render('portal', { title: 'Portal Visitantes TRT9', error: 'Credenciais inválidas.', message: null, params, redirectCtx: buildRedirectCtx(params) });
 }
 
 async function createLoginSession(userId, ctxJson) {
@@ -134,11 +163,13 @@ class AuthFlowError extends Error {
 app.get('/healthz', (_, res) => res.json({ status: 'ok' }));
 
 app.get('/portal', (req, res) => {
-  res.render('portal', { title: 'Portal Visitantes TRT9', error: null, message: null, params: req.query });
+  const params = normalizeBodyFields(req.query);
+  res.render('portal', { title: 'Portal Visitantes TRT9', error: null, message: null, params, redirectCtx: buildRedirectCtx(params) });
 });
 
 app.get('/register', (req, res) => {
-  res.render('register', { title: 'Cadastro de visitante', error: null, values: {}, params: req.query });
+  const params = normalizeBodyFields(req.query);
+  res.render('register', { title: 'Cadastro de visitante', error: null, values: {}, params, redirectCtx: buildRedirectCtx(params) });
 });
 
 app.get('/verify/sms', async (req, res) => {
@@ -182,7 +213,7 @@ app.post('/register', async (req, res) => {
   logInfo('register_attempt_started', requestContext);
   const parsed = registerSchema.safeParse(normalizedBody);
   if (!parsed.success) {
-    return res.status(400).render('register', { title: 'Cadastro de visitante', error: parsed.error.issues[0].message, values: normalizedBody, params });
+    return res.status(400).render('register', { title: 'Cadastro de visitante', error: parsed.error.issues[0].message, values: normalizedBody, params, redirectCtx: buildRedirectCtx(params) });
   }
 
   const { fullName, cpf, phone, email, password } = parsed.data;
@@ -221,7 +252,7 @@ app.post('/register', async (req, res) => {
       [user.id]
     );
 
-    const lsid = await createLoginSession(user.id, { ...params, stage: 'register', ue: { ip: params['UE-IP'] || params.ue_ip || params.uip, mac: params['UE-MAC'] || params.ue_mac || params.client_mac }, login_password: password });
+    const lsid = await createLoginSession(user.id, { ...params, stage: 'register', login_password: password });
     try {
       await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'register' });
       logInfo('register_attempt_success', { ...requestContext, user_id: user.id, normalized_cpf: user.cpf_normalizado });
@@ -239,7 +270,7 @@ app.post('/register', async (req, res) => {
     }
   } catch (error) {
     logError('register_attempt_failed', { ...requestContext, error });
-    return res.status(500).render('register', { title: 'Cadastro de visitante', error: 'Falha ao cadastrar usuário.', values: normalizedBody, params });
+    return res.status(500).render('register', { title: 'Cadastro de visitante', error: 'Falha ao cadastrar usuário.', values: normalizedBody, params, redirectCtx: buildRedirectCtx(params) });
   }
 });
 
@@ -276,7 +307,6 @@ app.post('/login', async (req, res) => {
     const lsid = await createLoginSession(user.id, {
       ...params,
       stage: 'login',
-      ue: { ip: params['UE-IP'] || params.ue_ip || params.uip, mac: params['UE-MAC'] || params.ue_mac || params.client_mac },
       radius_username: user.username_radius,
       login_password: password
     });
@@ -376,20 +406,22 @@ app.post('/verify/sms', async (req, res) => {
     );
 
     const ctx = session.ctx_json || {};
-    const ueIp = ctx.ue?.ip;
-    const ueMac = ctx.ue?.mac;
-    if (!ueIp || !ueMac) {
+    const { userIp, userMac, proxy, nbiIP } = resolveWisprParams(ctx);
+    if (!userIp || !userMac || !nbiIP) {
       throw new AuthFlowError(
         'Parâmetros WISPr ausentes.',
-        'Código confirmado com sucesso.',
+        'Acesse o portal a partir do Wi-Fi visitante (redirect captive).',
         400,
         'missing_wispr_params'
       );
     }
 
+    logInfo('wispr_params_received', { lsid: session.id, user_id: session.user_id, user_ip: userIp, user_mac: maskMac(userMac), proxy, nbi_ip: nbiIP });
+
     const nbiResult = await loginAndPoll({
-      ueIp,
-      ueMac,
+      ueIp: userIp,
+      ueMac: userMac,
+      ueProxy: proxy,
       ueUsername: session.username_radius || `visitante_${session.cpf_normalizado}`,
       uePassword: ctx.login_password || '',
       redirectParams: ctx
@@ -402,20 +434,20 @@ app.post('/verify/sms', async (req, res) => {
     await pool.query(`UPDATE login_sessions SET consumed_at = NOW() WHERE id = $1`, [session.id]);
     res.cookie('portal_session', String(session.user_id), { maxAge: SESSION_MAX_AGE_MS, httpOnly: true, sameSite: 'lax' });
 
-    logInfo('otp_verify_success', { lsid: session.id, user_id: session.user_id, ue_ip: ueIp, ue_mac: ueMac });
+    logInfo('otp_verify_success', { lsid: session.id, user_id: session.user_id, ue_ip: userIp, ue_mac: maskMac(userMac) });
     return res.redirect(getOriginalUrl(ctx));
   } catch (error) {
     logError('otp_verify_error', { lsid, error });
 
     const isMissingWispr = error instanceof AuthFlowError && error.reason === 'missing_wispr_params';
     const errorMessage = isMissingWispr
-      ? 'Houve um problema com os parâmetros WISPr da rede. Tente conectar novamente pelo portal captive.'
+      ? 'Acesse o portal a partir do Wi-Fi visitante (redirect captive).'
       : 'Código inválido ou expirado.';
 
     return res.status(error.statusCode || 401).render('verify_sms', {
       title: 'Verificar SMS',
       error: errorMessage,
-      message: isMissingWispr ? error.userMessage : null,
+      message: null,
       lsid,
       maskedPhone: '',
       resendWaitSeconds: OTP_RESEND_COOLDOWN_SECONDS

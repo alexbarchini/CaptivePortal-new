@@ -42,6 +42,7 @@
         <% Object.keys(params || {}).forEach((key) => { %>
           <input type="hidden" name="<%= key %>" value="<%= params[key] %>" />
         <% }) %>
+        <input type="hidden" name="ctx" value="<%= redirectCtx || '' %>" />
 
         <button type="submit">Cadastrar</button>
       </form>
