@@ -16,7 +16,7 @@ const {
   cleanDigits,
   formatCPF
 } = require('./utils/validators');
-const { loginAndPoll } = require('./services/nbi');
+const { loginAsync } = require('./services/ruckusNbi');
 const { buildSmsProvider } = require('./services/smsProvider');
 const { logInfo, logError, LOG_TZ, AUTH_LOG_FILE_PATH } = require('./utils/logger');
 
@@ -72,7 +72,14 @@ function getRedirectParams(req) {
   }
   return normalized;
 }
-function getOriginalUrl(params) { return params.url || params.orig_url || '/success'; }
+function getOriginalUrl(params) {
+  const candidate = params.url || params.orig_url || '/success';
+  try {
+    return decodeURIComponent(candidate);
+  } catch (_) {
+    return candidate;
+  }
+}
 function normalizeBodyFields(body = {}) {
   return Object.fromEntries(Object.entries(body).map(([key, value]) => [key, Array.isArray(value) ? value[0] : value]));
 }
@@ -418,18 +425,18 @@ app.post('/verify/sms', async (req, res) => {
 
     logInfo('wispr_params_received', { lsid: session.id, user_id: session.user_id, user_ip: userIp, user_mac: maskMac(userMac), proxy, nbi_ip: nbiIP });
 
-    const nbiResult = await loginAndPoll({
+    const nbiResult = await loginAsync({
+      nbiIP,
       ueIp: userIp,
       ueMac: userMac,
-      ueProxy: proxy,
+      proxy,
       ueUsername: session.username_radius || `visitante_${session.cpf_normalizado}`,
-      uePassword: ctx.login_password || '',
-      redirectParams: ctx
+      uePassword: ctx.login_password || ''
     });
 
     await pool.query(`INSERT INTO auth_events (user_id, login_session_id, event_type, status, detail) VALUES ($1, $2, 'sms_otp_login', $3, $4::jsonb)`, [session.user_id, session.id, nbiResult.success ? 'success' : 'failed', JSON.stringify({ mode: nbiResult.mode })]);
 
-    if (!nbiResult.success) throw new AuthFlowError('NBI falhou.', 'Falha na autorização do acesso. Tente novamente.', 401);
+    if (!nbiResult.success) throw new AuthFlowError('NBI falhou.', 'Falha na autorização do acesso. Revise os dados e tente novamente.', 401, 'nbi_failed');
 
     await pool.query(`UPDATE login_sessions SET consumed_at = NOW() WHERE id = $1`, [session.id]);
     res.cookie('portal_session', String(session.user_id), { maxAge: SESSION_MAX_AGE_MS, httpOnly: true, sameSite: 'lax' });
@@ -440,9 +447,12 @@ app.post('/verify/sms', async (req, res) => {
     logError('otp_verify_error', { lsid, error });
 
     const isMissingWispr = error instanceof AuthFlowError && error.reason === 'missing_wispr_params';
+    const isNbiFailed = error instanceof AuthFlowError && error.reason === 'nbi_failed';
     const errorMessage = isMissingWispr
       ? 'Acesse o portal a partir do Wi-Fi visitante (redirect captive).'
-      : 'Código inválido ou expirado.';
+      : isNbiFailed
+        ? 'Falha na autorização do acesso no SmartZone. Tente novamente sem reenviar OTP.'
+        : 'Código inválido ou expirado.';
 
     return res.status(error.statusCode || 401).render('verify_sms', {
       title: 'Verificar SMS',
