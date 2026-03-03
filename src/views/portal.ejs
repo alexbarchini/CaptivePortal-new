@@ -15,6 +15,9 @@
   <main class="container">
     <section class="card">
       <h2>Entrar no Wi-Fi de visitantes</h2>
+      <% if (contextBadge) { %>
+        <p class="ctx-badge">SSID: <%= contextBadge.ssid %> / IP: <%= contextBadge.uip %> / MAC: <%= contextBadge.macMasked %></p>
+      <% } %>
       <% if (error) { %><div class="alert error"><%= error %></div><% } %>
       <% if (message) { %><div class="alert ok"><%= message %></div><% } %>
       <form method="post" action="/login">

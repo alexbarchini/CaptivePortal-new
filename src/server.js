@@ -112,6 +112,9 @@ function resolveWisprParams(params = {}) {
   const nbiIP = params.nbiIP;
   return { userIp, userMac, proxy, nbiIP };
 }
+function hasRequiredWispr(ctx = {}) {
+  return Boolean(String(ctx.nbiIP || '').trim() && String(ctx.uip || '').trim() && String(ctx.client_mac || '').trim());
+}
 function pickWisprParams(raw = {}) {
   const params = normalizeBodyFields(raw);
   return {
@@ -145,8 +148,14 @@ function logCtxPresence(event, lsid, ctx) {
   const keys = ctxKeys(ctx || {});
   logInfo(event, { lsid, ctx_present: keys.length > 0, ctx_keys: keys });
 }
+function renderInvalidAccess(res, { title = 'Acesso inválido', statusCode = 400, message = 'Sessão expirada ou entrada inválida.' } = {}) {
+  return res.status(statusCode).render('invalid_access', {
+    title,
+    message
+  });
+}
 function genericInvalidCredentials(res, lsid = '', statusCode = 401) {
-  return res.status(statusCode).render('portal', { title: 'Portal Visitantes TRT9', error: 'Credenciais inválidas.', message: null, lsid });
+  return res.status(statusCode).render('portal', { title: 'Portal Visitantes TRT9', error: 'Credenciais inválidas.', message: null, lsid, contextBadge: null });
 }
 
 async function createPortalSession(params) {
@@ -179,9 +188,46 @@ async function createPortalSession(params) {
   return lsid;
 }
 
+function buildContextBadge(ctx = {}) {
+  if (!hasRequiredWispr(ctx)) return null;
+  return {
+    ssid: ctx.ssid || 'desconhecido',
+    uip: ctx.uip,
+    macMasked: maskMac(ctx.client_mac)
+  };
+}
+
 async function getLoginSession(lsid) {
   const result = await pool.query('SELECT * FROM login_sessions WHERE id = $1', [lsid]);
   return result.rows[0] || null;
+}
+
+async function resolvePreferredLsid(req, providedLsid = '') {
+  const bodyLsid = String(providedLsid || '').trim();
+  const cookieLsid = String(req.cookies?.portal_lsid || '').trim();
+
+  if (!bodyLsid && !cookieLsid) return { lsid: '', session: null };
+
+  const uniqueIds = [...new Set([bodyLsid, cookieLsid].filter(Boolean))];
+  const sessions = [];
+  for (const id of uniqueIds) {
+    const session = await getLoginSession(id);
+    if (session) sessions.push({ id, session });
+  }
+
+  const validWithCtx = sessions.find(({ session }) => {
+    const ctx = buildCtxFromSession(session);
+    return new Date(session.expires_at) >= new Date() && hasRequiredWispr(ctx);
+  });
+  if (validWithCtx) return { lsid: validWithCtx.id, session: validWithCtx.session };
+
+  const byProvided = sessions.find(({ id }) => id === bodyLsid);
+  if (byProvided) return { lsid: byProvided.id, session: byProvided.session };
+
+  const byCookie = sessions.find(({ id }) => id === cookieLsid);
+  if (byCookie) return { lsid: byCookie.id, session: byCookie.session };
+
+  return { lsid: bodyLsid || cookieLsid, session: null };
 }
 
 async function sendOtpForUser({ userId, phoneE164, reason, ueIp = null, ueMac = null, lsid = null }) {
@@ -281,13 +327,34 @@ class AuthFlowError extends Error {
 app.get('/healthz', (_, res) => res.json({ status: 'ok' }));
 
 app.get('/portal', (req, res) => {
+  const wisprCtx = pickWisprParams(req.query);
+  if (!hasRequiredWispr(wisprCtx)) {
+    logInfo('portal_ctx_missing_blocked', { request_ip: req.ip, params: sanitizeParams(wisprCtx) });
+    return renderInvalidAccess(res, {
+      title: 'Acesso inválido',
+      statusCode: 400,
+      message: 'Conecte-se ao Wi‑Fi de visitantes e abra qualquer site para ser redirecionado automaticamente ao portal.'
+    });
+  }
+
   createPortalSession(req.query)
     .then((lsid) => {
-      res.render('portal', { title: 'Portal Visitantes TRT9', error: null, message: null, lsid });
+      res.cookie('portal_lsid', lsid, {
+        maxAge: LOGIN_SESSION_TTL_SECONDS * 1000,
+        httpOnly: true,
+        sameSite: 'lax'
+      });
+      res.render('portal', {
+        title: 'Portal Visitantes TRT9',
+        error: null,
+        message: null,
+        lsid,
+        contextBadge: buildContextBadge(wisprCtx)
+      });
     })
     .catch((error) => {
       logError('portal_session_create_failed', { error });
-      res.status(500).render('portal', { title: 'Portal Visitantes TRT9', error: 'Falha ao iniciar sessão captive.', message: null, lsid: '' });
+      res.status(500).render('portal', { title: 'Portal Visitantes TRT9', error: 'Falha ao iniciar sessão captive.', message: null, lsid: '', contextBadge: null });
     });
 });
 
@@ -325,7 +392,8 @@ app.get('/verify/sms', async (req, res) => {
     message: 'Digite o código enviado por SMS.',
     lsid,
     maskedPhone: session.phone_e164.replace(/(\+55\d{2})\d{5}(\d{4})/, '$1*****$2'),
-    resendWaitSeconds: cooldown.waitSeconds
+    resendWaitSeconds: cooldown.waitSeconds,
+    contextBadge: buildContextBadge(buildCtxFromSession(session))
   });
 });
 
@@ -417,7 +485,8 @@ app.post('/register', async (req, res) => {
         message: null,
         lsid,
         maskedPhone: user.phone_e164.replace(/(\+55\d{2})\d{5}(\d{4})/, '$1*****$2'),
-        resendWaitSeconds: 0
+        resendWaitSeconds: 0,
+        contextBadge: buildContextBadge(params)
       });
     }
   } catch (error) {
@@ -428,8 +497,9 @@ app.post('/register', async (req, res) => {
 
 app.post('/login', async (req, res) => {
   const normalizedBody = normalizeBodyFields(req.body);
-  const lsid = String(normalizedBody.lsid || '');
-  const session = lsid ? await getLoginSession(lsid) : null;
+  const preferred = await resolvePreferredLsid(req, normalizedBody.lsid);
+  const lsid = preferred.lsid;
+  const session = preferred.session;
   const params = buildCtxFromSession(session || {});
   const requestContext = { lsid, cpf: cleanDigits(normalizedBody.cpf || ''), request_ip: req.ip, user_agent: req.get('user-agent') || '', params: sanitizeParams(params) };
 
@@ -438,12 +508,12 @@ app.post('/login', async (req, res) => {
   const parsed = loginSchema.safeParse(normalizedBody);
   if (!parsed.success) return genericInvalidCredentials(res, lsid, 401);
 
-  if (!session || new Date(session.expires_at) < new Date()) {
-    return res.status(400).render('portal', {
-      title: 'Portal Visitantes TRT9',
-      error: 'Sessão do captive expirada, volte e conecte novamente ao Wi-Fi',
-      message: null,
-      lsid: ''
+  if (!session || new Date(session.expires_at) < new Date() || !hasRequiredWispr(params)) {
+    logInfo('ctx_missing_blocked', { lsid, request_ip: req.ip });
+    return renderInvalidAccess(res, {
+      title: 'Sessão expirada/entrada inválida',
+      statusCode: 400,
+      message: 'Sessão expirada ou entrada inválida. Conecte-se ao Wi‑Fi de visitantes e abra um site para iniciar novamente o fluxo captive.'
     });
   }
   if (session.authorized_at || session.consumed_at) {
@@ -519,7 +589,8 @@ app.post('/verify/sms/resend', async (req, res) => {
       message: null,
       lsid,
       maskedPhone: session.phone_e164.replace(/(\+55\d{2})\d{5}(\d{4})/, '$1*****$2'),
-      resendWaitSeconds: cooldown.waitSeconds
+      resendWaitSeconds: cooldown.waitSeconds,
+      contextBadge: buildContextBadge(buildCtxFromSession(session))
     });
   }
 
@@ -533,7 +604,8 @@ app.post('/verify/sms/resend', async (req, res) => {
       message: null,
       lsid,
       maskedPhone: session.phone_e164.replace(/(\+55\d{2})\d{5}(\d{4})/, '$1*****$2'),
-      resendWaitSeconds: OTP_VALID_REUSE_WINDOW_SECONDS
+      resendWaitSeconds: OTP_VALID_REUSE_WINDOW_SECONDS,
+      contextBadge: buildContextBadge(buildCtxFromSession(session))
     });
   }
 
@@ -547,7 +619,7 @@ async function verifySmsHandler(req, res) {
   const lsid = String(normalizedBody.lsid || '');
 
   if (!parsed.success) {
-    return res.status(400).render('verify_sms', { title: 'Verificar SMS', error: 'Código inválido ou expirado.', message: null, lsid, maskedPhone: '', resendWaitSeconds: OTP_RESEND_COOLDOWN_SECONDS });
+    return res.status(400).render('verify_sms', { title: 'Verificar SMS', error: 'Código inválido ou expirado.', message: null, lsid, maskedPhone: '', resendWaitSeconds: OTP_RESEND_COOLDOWN_SECONDS, contextBadge: null });
   }
 
   const { code } = parsed.data;
@@ -564,6 +636,14 @@ async function verifySmsHandler(req, res) {
     const session = sessionQuery.rows[0];
     const sessionCtx = buildCtxFromSession(session);
     logCtxPresence('otp_verify_ctx_lookup', session.id, sessionCtx);
+    if (!hasRequiredWispr(sessionCtx)) {
+      logInfo('ctx_missing_blocked', { lsid: session.id, request_ip: req.ip });
+      return renderInvalidAccess(res, {
+        title: 'Sessão expirada/entrada inválida',
+        statusCode: 400,
+        message: 'Sessão expirada ou entrada inválida. Conecte-se ao Wi‑Fi de visitantes e abra um site para iniciar novamente o fluxo captive.'
+      });
+    }
     if (session.authorized_at || session.consumed_at) return res.redirect(getOriginalUrl(sessionCtx));
     if (new Date(session.expires_at) < new Date()) throw new AuthFlowError('Sessão inválida.', 'Sessão do captive expirada, volte e conecte novamente ao Wi-Fi', 400);
 
@@ -644,7 +724,8 @@ async function verifySmsHandler(req, res) {
       message: null,
       lsid,
       maskedPhone: '',
-      resendWaitSeconds: OTP_RESEND_COOLDOWN_SECONDS
+      resendWaitSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+      contextBadge: null
     });
   }
 }
