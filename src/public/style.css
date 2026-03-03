@@ -25,6 +25,16 @@ button { margin-top:16px; width:100%; background: var(--primary); color:#fff; bo
 .alert.error { background:#fde9e9; color:var(--danger); }
 .alert.ok { background:#e6f5eb; color:var(--ok); }
 .subtle { color:#536176; font-size:.92rem; margin-top:16px; }
+.ctx-badge {
+  display: inline-block;
+  margin: 8px 0 12px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: .78rem;
+  color: #36465e;
+  background: #eef3f9;
+  border: 1px solid #d8e1ec;
+}
 a { color: var(--primary); text-decoration: none; }
 
 .help-text { display:block; margin-top:6px; font-size:.85rem; color:#536176; }
