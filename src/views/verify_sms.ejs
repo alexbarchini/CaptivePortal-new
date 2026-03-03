@@ -19,7 +19,7 @@
       <% if (error) { %><div class="alert error"><%= error %></div><% } %>
       <% if (message) { %><div class="alert ok"><%= message %></div><% } %>
 
-      <form method="post" action="/verify/sms">
+      <form method="post" action="/otp/verify">
         <input type="hidden" name="lsid" value="<%= lsid %>" />
         <label for="code">Código (6 dígitos)</label>
         <input id="code" name="code" maxlength="6" required placeholder="000000" />
