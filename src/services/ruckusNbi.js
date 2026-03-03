@@ -1,10 +1,13 @@
 const axios = require('axios');
 const https = require('https');
-const { logInfo } = require('../utils/logger');
+const crypto = require('crypto');
+const { logInfo, logError } = require('../utils/logger');
 
 const REQUEST_TIMEOUT_MS = 5000;
 const STATUS_POLL_INTERVAL_MS = 1000;
 const STATUS_POLL_TIMEOUT_MS = 15000;
+const NBI_DEBUG = (process.env.NBI_DEBUG || 'false').toLowerCase() === 'true';
+const MAX_BODY_LOG_BYTES = 2048;
 
 function basePayload() {
   return {
@@ -34,22 +37,94 @@ function hasFailureCode(data) {
 }
 
 async function postJson(url, payload) {
-  const response = await axios.post(url, payload, {
+  return axios.post(url, payload, {
     timeout: REQUEST_TIMEOUT_MS,
     headers: { 'Content-Type': 'application/json' },
     httpsAgent: new https.Agent({ rejectUnauthorized: process.env.NBI_TLS_INSECURE !== 'true' })
   });
-  return response.data;
 }
 
-async function postWithFallback(nbiIP, payload) {
+function maskMac(mac = '') {
+  const value = String(mac || '');
+  if (!value) return '';
+  const compact = value.replace(/[^a-fA-F0-9]/g, '').toUpperCase();
+  if (compact.length < 6) return '***';
+  return `${compact.slice(0, 2)}:**:**:**:${compact.slice(-2)}`;
+}
+
+function truncateBody(value) {
+  const raw = typeof value === 'string' ? value : JSON.stringify(value || {});
+  if (Buffer.byteLength(raw, 'utf8') <= MAX_BODY_LOG_BYTES) return raw;
+  return `${Buffer.from(raw, 'utf8').subarray(0, MAX_BODY_LOG_BYTES).toString('utf8')}...(truncated)`;
+}
+
+function summarizeBody(data) {
+  return {
+    response_code: String(data?.ResponseCode ?? ''),
+    reply_message: String(data?.ReplyMessage ?? ''),
+    session_id: data?.SessionId || null,
+    transaction_id: data?.TransactionId || null
+  };
+}
+
+async function postWithFallback({ nbiIP, payload, requestType, requestId, ueIp, ueMac, ueUsername, proxy }) {
   let lastError = null;
   for (const endpoint of getEndpoints(nbiIP)) {
+    logInfo('nbi_request_prepared', {
+      request_id: requestId,
+      nbi_ip: nbiIP,
+      endpoint,
+      request_type: requestType,
+      ue_ip: ueIp,
+      ue_mac: maskMac(ueMac),
+      ue_username: ueUsername,
+      proxy: proxy || '0',
+      timeout_ms: REQUEST_TIMEOUT_MS
+    });
+
     try {
+      logInfo('nbi_http_request_sent', { request_id: requestId, timestamp: new Date().toISOString() });
       const response = await postJson(endpoint, payload);
-      return { response, endpoint };
+      const responseData = response?.data || {};
+      const selectedHeaders = {
+        'content-type': response?.headers?.['content-type'] || null,
+        server: response?.headers?.server || null
+      };
+
+      logInfo('nbi_http_response', NBI_DEBUG
+        ? {
+            request_id: requestId,
+            http_status: response.status,
+            headers: selectedHeaders,
+            body: truncateBody(responseData),
+            parsed: summarizeBody(responseData)
+          }
+        : {
+            request_id: requestId,
+            http_status: response.status,
+            response_code: String(responseData?.ResponseCode ?? '')
+          });
+
+      return { response: responseData, endpoint, httpStatus: response.status };
     } catch (error) {
       lastError = error;
+      logError('nbi_http_error', NBI_DEBUG
+        ? {
+            request_id: requestId,
+            code: error?.code || null,
+            message: error?.message || 'Erro desconhecido no NBI.',
+            stack: error?.stack || null,
+            config: {
+              url: error?.config?.url || endpoint,
+              method: error?.config?.method || 'post',
+              timeout: error?.config?.timeout || REQUEST_TIMEOUT_MS
+            }
+          }
+        : {
+            request_id: requestId,
+            code: error?.code || null,
+            message: error?.message || 'Erro desconhecido no NBI.'
+          });
     }
   }
   throw lastError || new Error('Falha ao chamar endpoint NBI.');
@@ -60,6 +135,7 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
     return { success: true, mode: 'mock', detail: { ReplyMessage: 'NBI mock habilitado.' } };
   }
 
+  const requestId = crypto.randomUUID();
   const loginPayload = {
     ...basePayload(),
     RequestType: 'LoginAsync',
@@ -70,16 +146,20 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
     'UE-Password': uePassword
   };
 
-  logInfo('nbi_login_async_sent', {
-    nbi_ip: nbiIP,
-    response_code: null,
-    reply_message: null
+  const loginResult = await postWithFallback({
+    nbiIP,
+    payload: loginPayload,
+    requestType: 'LoginAsync',
+    requestId,
+    ueIp,
+    ueMac,
+    ueUsername,
+    proxy
   });
-
-  const loginResult = await postWithFallback(nbiIP, loginPayload);
   const loginResponse = loginResult.response;
 
-  logInfo('nbi_login_async_sent', {
+  logInfo('nbi_login_async_result', {
+    request_id: requestId,
     nbi_ip: nbiIP,
     endpoint: loginResult.endpoint,
     response_code: String(loginResponse?.ResponseCode ?? ''),
@@ -93,7 +173,7 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
       response_code: String(loginResponse?.ResponseCode ?? ''),
       reply_message: String(loginResponse?.ReplyMessage ?? '')
     });
-    return { success: false, mode: 'login', detail: loginResponse };
+    return { success: false, mode: 'login', detail: loginResponse, requestId };
   }
 
   const startedAt = Date.now();
@@ -110,7 +190,16 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
       'UE-Password': uePassword
     };
 
-    const statusResult = await postWithFallback(nbiIP, statusPayload);
+    const statusResult = await postWithFallback({
+      nbiIP,
+      payload: statusPayload,
+      requestType: 'Status',
+      requestId,
+      ueIp,
+      ueMac,
+      ueUsername,
+      proxy
+    });
     const statusResponse = statusResult.response;
 
     logInfo('nbi_status_poll', {
@@ -127,7 +216,7 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
         response_code: String(statusResponse?.ResponseCode ?? ''),
         reply_message: String(statusResponse?.ReplyMessage ?? '')
       });
-      return { success: true, mode: 'status', detail: statusResponse };
+      return { success: true, mode: 'status', detail: statusResponse, requestId };
     }
 
     if (hasFailureCode(statusResponse)) {
@@ -137,7 +226,7 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
         response_code: String(statusResponse?.ResponseCode ?? ''),
         reply_message: String(statusResponse?.ReplyMessage ?? '')
       });
-      return { success: false, mode: 'status', detail: statusResponse };
+      return { success: false, mode: 'status', detail: statusResponse, requestId };
     }
   }
 
@@ -148,7 +237,7 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
     reply_message: timeoutDetail.ReplyMessage
   });
 
-  return { success: false, mode: 'timeout', detail: timeoutDetail };
+  return { success: false, mode: 'timeout', detail: timeoutDetail, requestId };
 }
 
 module.exports = { loginAsync };

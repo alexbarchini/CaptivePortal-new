@@ -28,6 +28,7 @@ const SESSION_MAX_AGE_MS = USER_ACCOUNT_VALIDITY_DAYS * 24 * 60 * 60 * 1000;
 const OTP_TTL_SECONDS = Number(process.env.OTP_TTL_SECONDS || 300);
 const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || 5);
 const OTP_RESEND_COOLDOWN_SECONDS = Number(process.env.OTP_RESEND_COOLDOWN_SECONDS || 60);
+const OTP_VALID_REUSE_WINDOW_SECONDS = Number(process.env.OTP_VALID_REUSE_WINDOW_SECONDS || 120);
 const LOGIN_SESSION_TTL_SECONDS = Number(process.env.LOGIN_SESSION_TTL_SECONDS || 600);
 const smsProvider = buildSmsProvider();
 
@@ -101,6 +102,9 @@ function maskMac(mac = '') {
   if (compact.length < 6) return '***';
   return `${compact.slice(0, 2)}:**:**:**:${compact.slice(-2)}`;
 }
+function normalizeMac(mac = '') {
+  return String(mac || '').replace(/[^a-fA-F0-9]/g, '').toUpperCase();
+}
 function resolveWisprParams(params = {}) {
   const userIp = params.uip || params['UE-IP'] || params.client_ip;
   const userMac = params.client_mac || params['UE-MAC'];
@@ -122,19 +126,19 @@ async function createLoginSession(userId, ctxJson) {
   return lsid;
 }
 
-async function sendOtpForUser({ userId, phoneE164, reason }) {
+async function sendOtpForUser({ userId, phoneE164, reason, ueIp = null, ueMac = null }) {
   const code = String(Math.floor(100000 + Math.random() * 900000));
   const codeHash = await argon2.hash(code);
 
   await smsProvider.send(phoneE164, `Seu código de acesso do Portal TRT9 é ${code}. Ele expira em ${Math.ceil(OTP_TTL_SECONDS / 60)} minutos.`);
 
   await pool.query(
-    `INSERT INTO otp_codes (user_id, channel, destination, code_hash, expires_at)
-     VALUES ($1, 'sms', $2, $3, NOW() + ($4 || ' seconds')::interval)`,
-    [userId, phoneE164, codeHash, OTP_TTL_SECONDS]
+    `INSERT INTO otp_codes (user_id, channel, destination, code_hash, expires_at, ue_ip, ue_mac)
+     VALUES ($1, 'sms', $2, $3, NOW() + ($4 || ' seconds')::interval, $5, $6)`,
+    [userId, phoneE164, codeHash, OTP_TTL_SECONDS, ueIp, normalizeMac(ueMac)]
   );
 
-  logInfo('otp_sent', { user_id: userId, destination: phoneE164, reason });
+  logInfo('otp_sent', { user_id: userId, destination: phoneE164, reason, ue_ip: ueIp, ue_mac: maskMac(ueMac) });
 }
 
 async function getLatestOtp(userId) {
@@ -155,6 +159,46 @@ async function ensureResendCooldown(userId) {
   const cooldown = await pool.query(cooldownSql, [latestOtp.created_at, OTP_RESEND_COOLDOWN_SECONDS]);
   const waitSeconds = cooldown.rows[0].wait_seconds;
   return { allowed: waitSeconds <= 0, waitSeconds };
+}
+
+async function hasRecentValidOtpForContext({ userId, ueIp, ueMac }) {
+  if (!userId || !ueIp || !ueMac) return false;
+  const result = await pool.query(
+    `SELECT 1
+     FROM otp_codes
+     WHERE user_id = $1
+       AND channel = 'sms'
+       AND ue_ip = $2
+       AND ue_mac = $3
+       AND verified_at IS NOT NULL
+       AND verified_at >= NOW() - ($4 || ' seconds')::interval
+     LIMIT 1`,
+    [userId, ueIp, normalizeMac(ueMac), OTP_VALID_REUSE_WINDOW_SECONDS]
+  );
+  return result.rowCount > 0;
+}
+
+async function authorizeViaNbi(ctx, user) {
+  const { userIp, userMac, proxy, nbiIP } = resolveWisprParams(ctx);
+  if (!userIp || !userMac || !nbiIP) {
+    throw new AuthFlowError(
+      'Parâmetros WISPr ausentes.',
+      'Acesse o portal a partir do Wi-Fi visitante (redirect captive).',
+      400,
+      'missing_wispr_params'
+    );
+  }
+
+  logInfo('wispr_params_received', { lsid: user.sessionId, user_id: user.userId, user_ip: userIp, user_mac: maskMac(userMac), proxy, nbi_ip: nbiIP });
+
+  return loginAsync({
+    nbiIP,
+    ueIp: userIp,
+    ueMac: userMac,
+    proxy,
+    ueUsername: user.usernameRadius || `visitante_${user.cpf}`,
+    uePassword: ctx.login_password || ''
+  });
 }
 
 class AuthFlowError extends Error {
@@ -260,8 +304,9 @@ app.post('/register', async (req, res) => {
     );
 
     const lsid = await createLoginSession(user.id, { ...params, stage: 'register', login_password: password });
+    const wispr = resolveWisprParams(params);
     try {
-      await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'register' });
+      await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'register', ueIp: wispr.userIp, ueMac: wispr.userMac });
       logInfo('register_attempt_success', { ...requestContext, user_id: user.id, normalized_cpf: user.cpf_normalizado });
       return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
     } catch (smsError) {
@@ -318,7 +363,13 @@ app.post('/login', async (req, res) => {
       login_password: password
     });
 
-    await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'login' });
+    const wispr = resolveWisprParams(params);
+    const hasRecentValidOtp = await hasRecentValidOtpForContext({ userId: user.id, ueIp: wispr.userIp, ueMac: wispr.userMac });
+    if (!hasRecentValidOtp) {
+      await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'login', ueIp: wispr.userIp, ueMac: wispr.userMac });
+    } else {
+      logInfo('otp_resend_skipped_recent_valid', { user_id: user.id, ue_ip: wispr.userIp, ue_mac: maskMac(wispr.userMac), window_seconds: OTP_VALID_REUSE_WINDOW_SECONDS });
+    }
 
     return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
   } catch (error) {
@@ -330,7 +381,7 @@ app.post('/login', async (req, res) => {
 app.post('/verify/sms/resend', async (req, res) => {
   const lsid = String(req.body.lsid || '');
   const sessionQuery = await pool.query(
-    `SELECT ls.id, ls.user_id, ls.expires_at, ls.consumed_at, u.phone_e164
+    `SELECT ls.id, ls.user_id, ls.ctx_json, ls.expires_at, ls.consumed_at, u.phone_e164
      FROM login_sessions ls
      JOIN users u ON u.id = ls.user_id
      WHERE ls.id = $1`,
@@ -353,7 +404,21 @@ app.post('/verify/sms/resend', async (req, res) => {
     });
   }
 
-  await sendOtpForUser({ userId: session.user_id, phoneE164: session.phone_e164, reason: 'resend' });
+  const wispr = resolveWisprParams(session.ctx_json || {});
+  const hasRecentValidOtp = await hasRecentValidOtpForContext({ userId: session.user_id, ueIp: wispr.userIp, ueMac: wispr.userMac });
+  if (hasRecentValidOtp) {
+    logInfo('otp_resend_skipped_recent_valid', { user_id: session.user_id, ue_ip: wispr.userIp, ue_mac: maskMac(wispr.userMac), window_seconds: OTP_VALID_REUSE_WINDOW_SECONDS });
+    return res.status(409).render('verify_sms', {
+      title: 'Verificar SMS',
+      error: 'Já existe OTP validado recentemente para este dispositivo. Aguarde 2 minutos para solicitar novo código.',
+      message: null,
+      lsid,
+      maskedPhone: session.phone_e164.replace(/(\+55\d{2})\d{5}(\d{4})/, '$1*****$2'),
+      resendWaitSeconds: OTP_VALID_REUSE_WINDOW_SECONDS
+    });
+  }
+
+  await sendOtpForUser({ userId: session.user_id, phoneE164: session.phone_e164, reason: 'resend', ueIp: wispr.userIp, ueMac: wispr.userMac });
   return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
 });
 
@@ -413,35 +478,29 @@ app.post('/verify/sms', async (req, res) => {
     );
 
     const ctx = session.ctx_json || {};
-    const { userIp, userMac, proxy, nbiIP } = resolveWisprParams(ctx);
-    if (!userIp || !userMac || !nbiIP) {
-      throw new AuthFlowError(
-        'Parâmetros WISPr ausentes.',
-        'Acesse o portal a partir do Wi-Fi visitante (redirect captive).',
-        400,
-        'missing_wispr_params'
-      );
-    }
+    const { userIp, userMac } = resolveWisprParams(ctx);
 
-    logInfo('wispr_params_received', { lsid: session.id, user_id: session.user_id, user_ip: userIp, user_mac: maskMac(userMac), proxy, nbi_ip: nbiIP });
+    logInfo('otp_verify_success', { lsid: session.id, user_id: session.user_id, ue_ip: userIp, ue_mac: maskMac(userMac) });
+    logInfo('authorize_flow_started', { lsid: session.id, user_id: session.user_id });
 
-    const nbiResult = await loginAsync({
-      nbiIP,
-      ueIp: userIp,
-      ueMac: userMac,
-      proxy,
-      ueUsername: session.username_radius || `visitante_${session.cpf_normalizado}`,
-      uePassword: ctx.login_password || ''
+    const nbiResult = await authorizeViaNbi(ctx, {
+      sessionId: session.id,
+      userId: session.user_id,
+      usernameRadius: session.username_radius,
+      cpf: session.cpf_normalizado
     });
 
-    await pool.query(`INSERT INTO auth_events (user_id, login_session_id, event_type, status, detail) VALUES ($1, $2, 'sms_otp_login', $3, $4::jsonb)`, [session.user_id, session.id, nbiResult.success ? 'success' : 'failed', JSON.stringify({ mode: nbiResult.mode })]);
+    await pool.query(`INSERT INTO auth_events (user_id, login_session_id, event_type, status, detail) VALUES ($1, $2, 'sms_otp_login', $3, $4::jsonb)`, [session.user_id, session.id, nbiResult.success ? 'success' : 'failed', JSON.stringify({ mode: nbiResult.mode, request_id: nbiResult.requestId || null })]);
 
-    if (!nbiResult.success) throw new AuthFlowError('NBI falhou.', 'Falha na autorização do acesso. Revise os dados e tente novamente.', 401, 'nbi_failed');
+    if (!nbiResult.success) {
+      logInfo('authorize_flow_failed', { lsid: session.id, user_id: session.user_id, reason: 'nbi_failed', request_id: nbiResult.requestId || null });
+      throw new AuthFlowError('NBI falhou.', `Falha na autorização do acesso no SmartZone. request_id=${nbiResult.requestId || 'n/a'}`, 401, 'nbi_failed');
+    }
 
     await pool.query(`UPDATE login_sessions SET consumed_at = NOW() WHERE id = $1`, [session.id]);
     res.cookie('portal_session', String(session.user_id), { maxAge: SESSION_MAX_AGE_MS, httpOnly: true, sameSite: 'lax' });
 
-    logInfo('otp_verify_success', { lsid: session.id, user_id: session.user_id, ue_ip: userIp, ue_mac: maskMac(userMac) });
+    logInfo('authorize_flow_success', { lsid: session.id, user_id: session.user_id, request_id: nbiResult.requestId || null });
     return res.redirect(getOriginalUrl(ctx));
   } catch (error) {
     logError('otp_verify_error', { lsid, error });
@@ -451,7 +510,7 @@ app.post('/verify/sms', async (req, res) => {
     const errorMessage = isMissingWispr
       ? 'Acesse o portal a partir do Wi-Fi visitante (redirect captive).'
       : isNbiFailed
-        ? 'Falha na autorização do acesso no SmartZone. Tente novamente sem reenviar OTP.'
+        ? error.userMessage || 'Falha na autorização do acesso no SmartZone.'
         : 'Código inválido ou expirado.';
 
     return res.status(error.statusCode || 401).render('verify_sms', {
