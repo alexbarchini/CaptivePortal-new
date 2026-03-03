@@ -57,22 +57,8 @@ const verifyLimiter = rateLimit({ windowMs: 60 * 1000, limit: Number(process.env
 app.use('/register', authLimiter);
 app.use('/login', authLimiter);
 app.use('/verify/sms', verifyLimiter);
+app.use('/otp/verify', verifyLimiter);
 
-function getRedirectParams(req) {
-  const normalized = normalizeBodyFields({ ...req.query, ...req.body });
-  const rawCtx = normalized.ctx || normalized.redirect_ctx;
-  if (rawCtx) {
-    try {
-      const decoded = JSON.parse(Buffer.from(String(rawCtx), 'base64url').toString('utf8'));
-      if (decoded && typeof decoded === 'object') {
-        return normalizeBodyFields({ ...decoded, ...normalized });
-      }
-    } catch (_) {
-      // segue fluxo normal se ctx estiver inválido
-    }
-  }
-  return normalized;
-}
 function getOriginalUrl(params) {
   const candidate = params.url || params.orig_url || '/success';
   try {
@@ -92,8 +78,22 @@ function sanitizeParams(params = {}) {
   if (sanitized.cpf) sanitized.cpf = cleanDigits(sanitized.cpf);
   return sanitized;
 }
-function buildRedirectCtx(params = {}) {
-  return Buffer.from(JSON.stringify(normalizeBodyFields(params)), 'utf8').toString('base64url');
+function buildCtxFromSession(session = {}) {
+  return {
+    nbiIP: session.nbi_ip || '',
+    uip: session.uip || '',
+    client_mac: session.client_mac || '',
+    proxy: session.proxy || '',
+    ssid: session.ssid || '',
+    sip: session.sip || '',
+    dn: session.dn || '',
+    wlanName: session.wlan_name || '',
+    url: session.url || '',
+    apip: session.apip || '',
+    vlan: session.vlan || '',
+    stage: session.stage || '',
+    login_password: session.login_password || ''
+  };
 }
 function maskMac(mac = '') {
   const value = String(mac || '');
@@ -112,36 +112,103 @@ function resolveWisprParams(params = {}) {
   const nbiIP = params.nbiIP;
   return { userIp, userMac, proxy, nbiIP };
 }
-function genericInvalidCredentials(res, params, statusCode = 401) {
-  return res.status(statusCode).render('portal', { title: 'Portal Visitantes TRT9', error: 'Credenciais inválidas.', message: null, params, redirectCtx: buildRedirectCtx(params) });
+function pickWisprParams(raw = {}) {
+  const params = normalizeBodyFields(raw);
+  return {
+    nbiIP: params.nbiIP || '',
+    uip: params.uip || params['UE-IP'] || params.client_ip || '',
+    client_mac: params.client_mac || params['UE-MAC'] || '',
+    proxy: params.proxy || '0',
+    ssid: params.ssid || '',
+    sip: params.sip || '',
+    dn: params.dn || '',
+    wlanName: params.wlanName || params.wlan_name || '',
+    url: params.url || params.orig_url || '/success',
+    apip: params.apip || '',
+    vlan: params.vlan || ''
+  };
+}
+function ctxKeys(ctx = {}) {
+  return Object.entries(ctx)
+    .filter(([key, value]) => {
+      const normalized = String(value || '').trim();
+      if (!normalized) return false;
+      if (key === 'stage' || key === 'login_password') return false;
+      if (key === 'proxy' && normalized === '0') return false;
+      if (key === 'url' && normalized === '/success') return false;
+      return true;
+    })
+    .map(([key]) => key)
+    .sort();
+}
+function logCtxPresence(event, lsid, ctx) {
+  const keys = ctxKeys(ctx || {});
+  logInfo(event, { lsid, ctx_present: keys.length > 0, ctx_keys: keys });
+}
+function genericInvalidCredentials(res, lsid = '', statusCode = 401) {
+  return res.status(statusCode).render('portal', { title: 'Portal Visitantes TRT9', error: 'Credenciais inválidas.', message: null, lsid });
 }
 
-async function createLoginSession(userId, ctxJson) {
+async function createPortalSession(params) {
   const lsid = crypto.randomUUID();
+  const ctx = pickWisprParams(params);
   await pool.query(
-    `INSERT INTO login_sessions (id, user_id, ctx_json, expires_at)
-     VALUES ($1, $2, $3::jsonb, NOW() + ($4 || ' seconds')::interval)`,
-    [lsid, userId, JSON.stringify(ctxJson), LOGIN_SESSION_TTL_SECONDS]
+    `INSERT INTO login_sessions (
+      id, ctx_json, nbi_ip, uip, client_mac, proxy, ssid, sip, dn, wlan_name, url, apip, vlan, expires_at
+    ) VALUES (
+      $1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + ($14 || ' seconds')::interval
+    )`,
+    [
+      lsid,
+      JSON.stringify(ctx),
+      ctx.nbiIP,
+      ctx.uip,
+      normalizeMac(ctx.client_mac),
+      ctx.proxy,
+      ctx.ssid,
+      ctx.sip,
+      ctx.dn,
+      ctx.wlanName,
+      ctx.url,
+      ctx.apip,
+      ctx.vlan,
+      LOGIN_SESSION_TTL_SECONDS
+    ]
   );
+  logCtxPresence('portal_ctx_captured', lsid, ctx);
   return lsid;
 }
 
-async function sendOtpForUser({ userId, phoneE164, reason, ueIp = null, ueMac = null }) {
+async function getLoginSession(lsid) {
+  const result = await pool.query('SELECT * FROM login_sessions WHERE id = $1', [lsid]);
+  return result.rows[0] || null;
+}
+
+async function sendOtpForUser({ userId, phoneE164, reason, ueIp = null, ueMac = null, lsid = null }) {
   const code = String(Math.floor(100000 + Math.random() * 900000));
   const codeHash = await argon2.hash(code);
 
   await smsProvider.send(phoneE164, `Seu código de acesso do Portal TRT9 é ${code}. Ele expira em ${Math.ceil(OTP_TTL_SECONDS / 60)} minutos.`);
 
   await pool.query(
-    `INSERT INTO otp_codes (user_id, channel, destination, code_hash, expires_at, ue_ip, ue_mac)
-     VALUES ($1, 'sms', $2, $3, NOW() + ($4 || ' seconds')::interval, $5, $6)`,
-    [userId, phoneE164, codeHash, OTP_TTL_SECONDS, ueIp, normalizeMac(ueMac)]
+    `INSERT INTO otp_codes (user_id, login_session_id, channel, destination, code_hash, expires_at, ue_ip, ue_mac)
+     VALUES ($1, $2, 'sms', $3, $4, NOW() + ($5 || ' seconds')::interval, $6, $7)`,
+    [userId, lsid, phoneE164, codeHash, OTP_TTL_SECONDS, ueIp, normalizeMac(ueMac)]
   );
 
-  logInfo('otp_sent', { user_id: userId, destination: phoneE164, reason, ue_ip: ueIp, ue_mac: maskMac(ueMac) });
+  logInfo('otp_sent', { lsid, user_id: userId, destination: phoneE164, reason, ue_ip: ueIp, ue_mac: maskMac(ueMac) });
 }
 
-async function getLatestOtp(userId) {
+async function getLatestOtp(userId, lsid = null) {
+  if (lsid) {
+    const result = await pool.query(
+      `SELECT * FROM otp_codes
+       WHERE user_id = $1 AND login_session_id = $2 AND channel = 'sms'
+       ORDER BY created_at DESC LIMIT 1`,
+      [userId, lsid]
+    );
+    return result.rows[0] || null;
+  }
   const result = await pool.query(
     `SELECT * FROM otp_codes
      WHERE user_id = $1 AND channel = 'sms'
@@ -151,8 +218,8 @@ async function getLatestOtp(userId) {
   return result.rows[0] || null;
 }
 
-async function ensureResendCooldown(userId) {
-  const latestOtp = await getLatestOtp(userId);
+async function ensureResendCooldown(userId, lsid = null) {
+  const latestOtp = await getLatestOtp(userId, lsid);
   if (!latestOtp) return { allowed: true, waitSeconds: 0 };
 
   const cooldownSql = `SELECT GREATEST(0, $2 - EXTRACT(EPOCH FROM (NOW() - $1::timestamptz))::int) AS wait_seconds`;
@@ -214,13 +281,23 @@ class AuthFlowError extends Error {
 app.get('/healthz', (_, res) => res.json({ status: 'ok' }));
 
 app.get('/portal', (req, res) => {
-  const params = normalizeBodyFields(req.query);
-  res.render('portal', { title: 'Portal Visitantes TRT9', error: null, message: null, params, redirectCtx: buildRedirectCtx(params) });
+  createPortalSession(req.query)
+    .then((lsid) => {
+      res.render('portal', { title: 'Portal Visitantes TRT9', error: null, message: null, lsid });
+    })
+    .catch((error) => {
+      logError('portal_session_create_failed', { error });
+      res.status(500).render('portal', { title: 'Portal Visitantes TRT9', error: 'Falha ao iniciar sessão captive.', message: null, lsid: '' });
+    });
 });
 
-app.get('/register', (req, res) => {
-  const params = normalizeBodyFields(req.query);
-  res.render('register', { title: 'Cadastro de visitante', error: null, values: {}, params, redirectCtx: buildRedirectCtx(params) });
+app.get('/register', async (req, res) => {
+  const lsid = String(req.query.lsid || '');
+  if (!lsid) return res.redirect('/portal');
+  const session = await getLoginSession(lsid);
+  if (!session || new Date(session.expires_at) < new Date()) return res.redirect('/portal');
+  logCtxPresence('register_ctx_lookup', lsid, buildCtxFromSession(session));
+  res.render('register', { title: 'Cadastro de visitante', error: null, values: {}, lsid });
 });
 
 app.get('/verify/sms', async (req, res) => {
@@ -228,7 +305,7 @@ app.get('/verify/sms', async (req, res) => {
   if (!lsid) return res.redirect('/portal');
 
   const sessionQuery = await pool.query(
-    `SELECT ls.id, ls.user_id, ls.ctx_json, ls.expires_at, ls.consumed_at, u.phone_e164
+    `SELECT ls.id, ls.user_id, ls.ctx_json, ls.expires_at, ls.consumed_at, ls.authorized_at, ls.nbi_ip, ls.uip, ls.client_mac, ls.proxy, ls.ssid, ls.sip, ls.dn, ls.wlan_name, ls.url, ls.apip, ls.vlan, u.phone_e164
      FROM login_sessions ls
      JOIN users u ON u.id = ls.user_id
      WHERE ls.id = $1`,
@@ -237,9 +314,10 @@ app.get('/verify/sms', async (req, res) => {
 
   if (sessionQuery.rowCount === 0) return res.redirect('/portal');
   const session = sessionQuery.rows[0];
-  if (session.consumed_at || new Date(session.expires_at) < new Date()) return res.redirect('/portal');
+  if (session.authorized_at || session.consumed_at || new Date(session.expires_at) < new Date()) return res.redirect('/portal');
 
-  const cooldown = await ensureResendCooldown(session.user_id);
+  logCtxPresence('verify_sms_ctx_lookup', lsid, buildCtxFromSession(session));
+  const cooldown = await ensureResendCooldown(session.user_id, lsid);
 
   return res.render('verify_sms', {
     title: 'Verificar SMS',
@@ -252,9 +330,12 @@ app.get('/verify/sms', async (req, res) => {
 });
 
 app.post('/register', async (req, res) => {
-  const params = getRedirectParams(req);
+  const lsid = String(req.body.lsid || '');
+  const session = lsid ? await getLoginSession(lsid) : null;
+  const params = buildCtxFromSession(session || {});
   const normalizedBody = normalizeBodyFields(req.body);
   const requestContext = {
+    lsid,
     cpf: cleanDigits(normalizedBody.cpf || ''),
     request_ip: req.ip,
     user_agent: req.get('user-agent') || '',
@@ -262,9 +343,23 @@ app.post('/register', async (req, res) => {
   };
 
   logInfo('register_attempt_started', requestContext);
+  logCtxPresence('register_post_ctx_lookup', lsid, params);
+  if (!session || new Date(session.expires_at) < new Date()) {
+    return res.status(400).render('portal', {
+      title: 'Portal Visitantes TRT9',
+      error: 'Sessão do captive expirada, volte e conecte novamente ao Wi-Fi',
+      message: null,
+      lsid: ''
+    });
+  }
+
+  if (session.authorized_at || session.consumed_at) {
+    return res.redirect(getOriginalUrl(params));
+  }
+
   const parsed = registerSchema.safeParse(normalizedBody);
   if (!parsed.success) {
-    return res.status(400).render('register', { title: 'Cadastro de visitante', error: parsed.error.issues[0].message, values: normalizedBody, params, redirectCtx: buildRedirectCtx(params) });
+    return res.status(400).render('register', { title: 'Cadastro de visitante', error: parsed.error.issues[0].message, values: normalizedBody, lsid });
   }
 
   const { fullName, cpf, phone, email, password } = parsed.data;
@@ -303,10 +398,15 @@ app.post('/register', async (req, res) => {
       [user.id]
     );
 
-    const lsid = await createLoginSession(user.id, { ...params, stage: 'register', login_password: password });
+    await pool.query(
+      `UPDATE login_sessions
+       SET user_id = $2, stage = 'register', login_password = $3
+       WHERE id = $1`,
+      [lsid, user.id, password]
+    );
     const wispr = resolveWisprParams(params);
     try {
-      await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'register', ueIp: wispr.userIp, ueMac: wispr.userMac });
+      await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'register', ueIp: wispr.userIp, ueMac: wispr.userMac, lsid });
       logInfo('register_attempt_success', { ...requestContext, user_id: user.id, normalized_cpf: user.cpf_normalizado });
       return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
     } catch (smsError) {
@@ -322,18 +422,33 @@ app.post('/register', async (req, res) => {
     }
   } catch (error) {
     logError('register_attempt_failed', { ...requestContext, error });
-    return res.status(500).render('register', { title: 'Cadastro de visitante', error: 'Falha ao cadastrar usuário.', values: normalizedBody, params, redirectCtx: buildRedirectCtx(params) });
+    return res.status(500).render('register', { title: 'Cadastro de visitante', error: 'Falha ao cadastrar usuário.', values: normalizedBody, lsid });
   }
 });
 
 app.post('/login', async (req, res) => {
-  const params = getRedirectParams(req);
   const normalizedBody = normalizeBodyFields(req.body);
-  const requestContext = { cpf: cleanDigits(normalizedBody.cpf || ''), request_ip: req.ip, user_agent: req.get('user-agent') || '', params: sanitizeParams(params) };
+  const lsid = String(normalizedBody.lsid || '');
+  const session = lsid ? await getLoginSession(lsid) : null;
+  const params = buildCtxFromSession(session || {});
+  const requestContext = { lsid, cpf: cleanDigits(normalizedBody.cpf || ''), request_ip: req.ip, user_agent: req.get('user-agent') || '', params: sanitizeParams(params) };
 
   logInfo('login_attempt_started', requestContext);
+  logCtxPresence('login_ctx_lookup', lsid, params);
   const parsed = loginSchema.safeParse(normalizedBody);
-  if (!parsed.success) return genericInvalidCredentials(res, params, 401);
+  if (!parsed.success) return genericInvalidCredentials(res, lsid, 401);
+
+  if (!session || new Date(session.expires_at) < new Date()) {
+    return res.status(400).render('portal', {
+      title: 'Portal Visitantes TRT9',
+      error: 'Sessão do captive expirada, volte e conecte novamente ao Wi-Fi',
+      message: null,
+      lsid: ''
+    });
+  }
+  if (session.authorized_at || session.consumed_at) {
+    return res.redirect(getOriginalUrl(params));
+  }
 
   const { cpf, password } = parsed.data;
   try {
@@ -356,17 +471,20 @@ app.post('/login', async (req, res) => {
       await pool.query(`UPDATE users SET expires_at = NOW() + ($2 || ' days')::interval, updated_at = NOW() WHERE id = $1`, [user.id, USER_ACCOUNT_VALIDITY_DAYS]);
     }
 
-    const lsid = await createLoginSession(user.id, {
-      ...params,
-      stage: 'login',
-      radius_username: user.username_radius,
-      login_password: password
-    });
+    await pool.query(
+      `UPDATE login_sessions
+       SET user_id = $2,
+           stage = 'login',
+           radius_username = $3,
+           login_password = $4
+       WHERE id = $1`,
+      [lsid, user.id, user.username_radius, password]
+    );
 
     const wispr = resolveWisprParams(params);
     const hasRecentValidOtp = await hasRecentValidOtpForContext({ userId: user.id, ueIp: wispr.userIp, ueMac: wispr.userMac });
     if (!hasRecentValidOtp) {
-      await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'login', ueIp: wispr.userIp, ueMac: wispr.userMac });
+      await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'login', ueIp: wispr.userIp, ueMac: wispr.userMac, lsid });
     } else {
       logInfo('otp_resend_skipped_recent_valid', { user_id: user.id, ue_ip: wispr.userIp, ue_mac: maskMac(wispr.userMac), window_seconds: OTP_VALID_REUSE_WINDOW_SECONDS });
     }
@@ -374,25 +492,26 @@ app.post('/login', async (req, res) => {
     return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
   } catch (error) {
     logError('login_attempt_failed', { ...requestContext, reason: error.reason || undefined, error });
-    return genericInvalidCredentials(res, params, error.statusCode || 401);
+    return genericInvalidCredentials(res, lsid, error.statusCode || 401);
   }
 });
 
 app.post('/verify/sms/resend', async (req, res) => {
   const lsid = String(req.body.lsid || '');
   const sessionQuery = await pool.query(
-    `SELECT ls.id, ls.user_id, ls.ctx_json, ls.expires_at, ls.consumed_at, u.phone_e164
+    `SELECT ls.id, ls.user_id, ls.ctx_json, ls.expires_at, ls.consumed_at, ls.authorized_at, ls.nbi_ip, ls.uip, ls.client_mac, ls.proxy, ls.ssid, ls.sip, ls.dn, ls.wlan_name, ls.url, ls.apip, ls.vlan, u.phone_e164
      FROM login_sessions ls
      JOIN users u ON u.id = ls.user_id
      WHERE ls.id = $1`,
     [lsid]
   );
-  if (sessionQuery.rowCount === 0) return genericInvalidCredentials(res, {});
+  if (sessionQuery.rowCount === 0) return genericInvalidCredentials(res, lsid);
 
   const session = sessionQuery.rows[0];
-  if (session.consumed_at || new Date(session.expires_at) < new Date()) return genericInvalidCredentials(res, {});
+  if (session.authorized_at || session.consumed_at || new Date(session.expires_at) < new Date()) return genericInvalidCredentials(res, lsid);
 
-  const cooldown = await ensureResendCooldown(session.user_id);
+  logCtxPresence('otp_resend_ctx_lookup', lsid, buildCtxFromSession(session));
+  const cooldown = await ensureResendCooldown(session.user_id, lsid);
   if (!cooldown.allowed) {
     return res.status(429).render('verify_sms', {
       title: 'Verificar SMS',
@@ -404,7 +523,7 @@ app.post('/verify/sms/resend', async (req, res) => {
     });
   }
 
-  const wispr = resolveWisprParams(session.ctx_json || {});
+  const wispr = resolveWisprParams(buildCtxFromSession(session));
   const hasRecentValidOtp = await hasRecentValidOtpForContext({ userId: session.user_id, ueIp: wispr.userIp, ueMac: wispr.userMac });
   if (hasRecentValidOtp) {
     logInfo('otp_resend_skipped_recent_valid', { user_id: session.user_id, ue_ip: wispr.userIp, ue_mac: maskMac(wispr.userMac), window_seconds: OTP_VALID_REUSE_WINDOW_SECONDS });
@@ -418,11 +537,11 @@ app.post('/verify/sms/resend', async (req, res) => {
     });
   }
 
-  await sendOtpForUser({ userId: session.user_id, phoneE164: session.phone_e164, reason: 'resend', ueIp: wispr.userIp, ueMac: wispr.userMac });
+  await sendOtpForUser({ userId: session.user_id, phoneE164: session.phone_e164, reason: 'resend', ueIp: wispr.userIp, ueMac: wispr.userMac, lsid });
   return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
 });
 
-app.post('/verify/sms', async (req, res) => {
+async function verifySmsHandler(req, res) {
   const normalizedBody = normalizeBodyFields(req.body);
   const parsed = verifySmsSchema.safeParse(normalizedBody);
   const lsid = String(normalizedBody.lsid || '');
@@ -434,18 +553,21 @@ app.post('/verify/sms', async (req, res) => {
   const { code } = parsed.data;
   try {
     const sessionQuery = await pool.query(
-      `SELECT ls.id, ls.user_id, ls.ctx_json, ls.expires_at, ls.consumed_at, u.username_radius, u.phone_e164, u.cpf_normalizado
+      `SELECT ls.*, u.username_radius, u.phone_e164, u.cpf_normalizado
        FROM login_sessions ls
        JOIN users u ON u.id = ls.user_id
        WHERE ls.id = $1`,
       [parsed.data.lsid]
     );
 
-    if (sessionQuery.rowCount === 0) throw new AuthFlowError('Sessão não encontrada.', 'Código inválido ou expirado.');
+    if (sessionQuery.rowCount === 0) throw new AuthFlowError('Sessão não encontrada.', 'Sessão do captive expirada, volte e conecte novamente ao Wi-Fi', 400);
     const session = sessionQuery.rows[0];
-    if (session.consumed_at || new Date(session.expires_at) < new Date()) throw new AuthFlowError('Sessão inválida.', 'Código inválido ou expirado.');
+    const sessionCtx = buildCtxFromSession(session);
+    logCtxPresence('otp_verify_ctx_lookup', session.id, sessionCtx);
+    if (session.authorized_at || session.consumed_at) return res.redirect(getOriginalUrl(sessionCtx));
+    if (new Date(session.expires_at) < new Date()) throw new AuthFlowError('Sessão inválida.', 'Sessão do captive expirada, volte e conecte novamente ao Wi-Fi', 400);
 
-    const otp = await getLatestOtp(session.user_id);
+    const otp = await getLatestOtp(session.user_id, session.id);
     if (!otp || otp.verified_at || otp.blocked_at || new Date(otp.expires_at) < new Date()) {
       throw new AuthFlowError('OTP inválido.', 'Código inválido ou expirado.');
     }
@@ -477,7 +599,7 @@ app.post('/verify/sms', async (req, res) => {
       [session.user_id]
     );
 
-    const ctx = session.ctx_json || {};
+    const ctx = sessionCtx;
     const { userIp, userMac } = resolveWisprParams(ctx);
 
     logInfo('otp_verify_success', { lsid: session.id, user_id: session.user_id, ue_ip: userIp, ue_mac: maskMac(userMac) });
@@ -497,7 +619,7 @@ app.post('/verify/sms', async (req, res) => {
       throw new AuthFlowError('NBI falhou.', `Falha na autorização do acesso no SmartZone. request_id=${nbiResult.requestId || 'n/a'}`, 401, 'nbi_failed');
     }
 
-    await pool.query(`UPDATE login_sessions SET consumed_at = NOW() WHERE id = $1`, [session.id]);
+    await pool.query(`UPDATE login_sessions SET consumed_at = NOW(), authorized_at = NOW() WHERE id = $1`, [session.id]);
     res.cookie('portal_session', String(session.user_id), { maxAge: SESSION_MAX_AGE_MS, httpOnly: true, sameSite: 'lax' });
 
     logInfo('authorize_flow_success', { lsid: session.id, user_id: session.user_id, request_id: nbiResult.requestId || null });
@@ -507,11 +629,14 @@ app.post('/verify/sms', async (req, res) => {
 
     const isMissingWispr = error instanceof AuthFlowError && error.reason === 'missing_wispr_params';
     const isNbiFailed = error instanceof AuthFlowError && error.reason === 'nbi_failed';
+    const isSessionExpired = error instanceof AuthFlowError && (error.statusCode === 400) && error.userMessage;
     const errorMessage = isMissingWispr
       ? 'Acesse o portal a partir do Wi-Fi visitante (redirect captive).'
       : isNbiFailed
         ? error.userMessage || 'Falha na autorização do acesso no SmartZone.'
-        : 'Código inválido ou expirado.';
+        : isSessionExpired
+          ? error.userMessage
+          : 'Código inválido ou expirado.';
 
     return res.status(error.statusCode || 401).render('verify_sms', {
       title: 'Verificar SMS',
@@ -522,7 +647,10 @@ app.post('/verify/sms', async (req, res) => {
       resendWaitSeconds: OTP_RESEND_COOLDOWN_SECONDS
     });
   }
-});
+}
+
+app.post('/verify/sms', verifySmsHandler);
+app.post('/otp/verify', verifySmsHandler);
 
 app.get('/terms', (_, res) => {
   res.render('terms', { title: 'Termos de Uso' });

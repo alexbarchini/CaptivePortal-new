@@ -39,14 +39,11 @@
         <label class="check"><input type="checkbox" name="accepted_terms" required /> Li e concordo com os <a href="/terms" target="_blank" rel="noopener noreferrer">Termos de Uso</a></label>
         <label class="check"><input type="checkbox" name="accepted_processing" required /> Autorizo o tratamento dos dados pessoais para fins de controle de acesso e auditoria (LGPD)</label>
 
-        <% Object.keys(params || {}).forEach((key) => { %>
-          <input type="hidden" name="<%= key %>" value="<%= params[key] %>" />
-        <% }) %>
-        <input type="hidden" name="ctx" value="<%= redirectCtx || '' %>" />
+        <input type="hidden" name="lsid" value="<%= lsid || '' %>" />
 
         <button type="submit">Cadastrar</button>
       </form>
-      <p class="subtle"><a href="/portal?<%= new URLSearchParams(params || {}).toString() %>">Voltar para login</a></p>
+      <p class="subtle"><a href="/portal">Voltar para login</a></p>
     </section>
   </main>
 
