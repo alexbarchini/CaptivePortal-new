@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= title %></title>
+  <link rel="stylesheet" href="/public/style.css" />
+</head>
+<body>
+  <header class="header">
+    <div class="logo-wrap">
+      <img src="/public/trt9-logo.jpg" alt="Justiça do Trabalho TRT da 9ª Região" class="logo"/>
+    </div>
+  </header>
+  <main class="container">
+    <section class="card">
+      <h2>Você está conectado à rede <%= ssid %></h2>
+
+      <div class="session-info">
+        <p><strong>Usuário:</strong> <%= userName %></p>
+        <p><strong>CPF:</strong> <%= cpfMasked %></p>
+        <p><strong>Conectado desde:</strong> <%= authorizedAtLabel %></p>
+        <p><strong>Duração da sessão:</strong> <%= sessionDuration %></p>
+      </div>
+
+      <form method="post" action="/logout">
+        <button type="submit" class="btn-danger">Logout</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

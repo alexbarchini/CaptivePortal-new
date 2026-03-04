@@ -286,4 +286,46 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
   return { success: false, mode: 'timeout', detail: timeoutDetail, requestId };
 }
 
-module.exports = { loginAsync };
+async function disconnectAsync({ nbiIP, ueIp, ueMac, proxy }) {
+  if (process.env.NBI_MOCK === 'true') {
+    return { success: true, mode: 'mock', detail: { ReplyMessage: 'NBI mock habilitado.' } };
+  }
+
+  const requestId = crypto.randomUUID();
+  const disconnectPayload = {
+    ...basePayload(),
+    RequestType: 'Disconnect',
+    'UE-IP': ueIp,
+    'UE-MAC': ueMac,
+    'UE-Proxy': proxy || '0'
+  };
+
+  const disconnectResult = await postWithFallback({
+    nbiIP,
+    payload: disconnectPayload,
+    requestType: 'Disconnect',
+    requestId,
+    ueIp,
+    ueMac,
+    proxy
+  });
+  const disconnectResponse = disconnectResult.response;
+
+  logInfo('nbi_disconnect_result', {
+    request_id: requestId,
+    nbi_ip: nbiIP,
+    endpoint: disconnectResult.endpoint,
+    response_code: responseCode(disconnectResponse),
+    reply_message: String(disconnectResponse?.ReplyMessage ?? ''),
+    session_id: disconnectResponse?.SessionId || null,
+    transaction_id: disconnectResponse?.TransactionId || null
+  });
+
+  if (isSuccess(disconnectResponse)) {
+    return { success: true, mode: 'disconnect', detail: disconnectResponse, requestId };
+  }
+
+  return { success: false, mode: 'disconnect', detail: disconnectResponse, requestId };
+}
+
+module.exports = { loginAsync, disconnectAsync };
