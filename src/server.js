@@ -16,7 +16,7 @@ const {
   cleanDigits,
   formatCPF
 } = require('./utils/validators');
-const { loginAsync } = require('./services/ruckusNbi');
+const { loginAsync, disconnectAsync } = require('./services/ruckusNbi');
 const { buildSmsProvider } = require('./services/smsProvider');
 const { logInfo, logError, LOG_TZ, AUTH_LOG_FILE_PATH } = require('./utils/logger');
 
@@ -164,6 +164,38 @@ function renderInvalidAccess(res, { title = 'Acesso inválido', statusCode = 400
 }
 function genericInvalidCredentials(res, lsid = '', statusCode = 401) {
   return res.status(statusCode).render('portal', { title: 'Portal Visitantes TRT9', error: 'Credenciais inválidas.', message: null, lsid, contextBadge: null });
+}
+
+
+function maskCpf(cpf = '') {
+  const digits = cleanDigits(cpf);
+  if (digits.length !== 11) return '***.***.***-**';
+  return `${digits.slice(0, 3)}.***.***-${digits.slice(-2)}`;
+}
+function formatDateTime(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: LOG_TZ,
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(date);
+}
+function formatDurationSince(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  const diffMs = Date.now() - date.getTime();
+  if (diffMs <= 0) return 'menos de 1 minuto';
+  const totalMinutes = Math.floor(diffMs / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours <= 0) return `${minutes} minuto${minutes === 1 ? '' : 's'}`;
+  if (minutes === 0) return `${hours} hora${hours === 1 ? '' : 's'}`;
+  return `${hours} hora${hours === 1 ? '' : 's'} e ${minutes} minuto${minutes === 1 ? '' : 's'}`;
 }
 
 async function createPortalSession(params) {
@@ -334,7 +366,7 @@ class AuthFlowError extends Error {
 
 app.get('/healthz', (_, res) => res.json({ status: 'ok' }));
 
-app.get('/portal', (req, res) => {
+app.get('/portal', async (req, res) => {
   const wisprCtx = pickWisprParams(req.query);
   if (!hasRequiredWispr(wisprCtx)) {
     logInfo('portal_ctx_missing_blocked', { request_ip: req.ip, params: sanitizeParams(wisprCtx) });
@@ -345,25 +377,49 @@ app.get('/portal', (req, res) => {
     });
   }
 
-  createPortalSession(req.query)
-    .then((lsid) => {
-      res.cookie('portal_lsid', lsid, {
-        maxAge: LOGIN_SESSION_TTL_SECONDS * 1000,
-        httpOnly: true,
-        sameSite: 'lax'
-      });
-      res.render('portal', {
-        title: 'Portal Visitantes TRT9',
-        error: null,
-        message: null,
-        lsid,
-        contextBadge: buildContextBadge(wisprCtx)
-      });
-    })
-    .catch((error) => {
-      logError('portal_session_create_failed', { error });
-      res.status(500).render('portal', { title: 'Portal Visitantes TRT9', error: 'Falha ao iniciar sessão captive.', message: null, lsid: '', contextBadge: null });
+  try {
+    const portalSessionUserId = String(req.cookies?.portal_session || '').trim();
+    if (portalSessionUserId) {
+      const activeLogin = await pool.query(
+        `SELECT ls.id, ls.authorized_at, ls.nbi_ip, ls.uip, ls.client_mac, ls.proxy, ls.ssid, u.nome, u.cpf_formatado, u.cpf_normalizado
+         FROM login_sessions ls
+         JOIN users u ON u.id = ls.user_id
+         WHERE ls.user_id = $1 AND ls.authorized_at IS NOT NULL
+         ORDER BY ls.authorized_at DESC
+         LIMIT 1`,
+        [portalSessionUserId]
+      );
+
+      if (activeLogin.rowCount > 0) {
+        const logged = activeLogin.rows[0];
+        return res.render('logged_in', {
+          title: 'Sessão ativa',
+          userName: logged.nome || 'Visitante',
+          cpfMasked: maskCpf(logged.cpf_formatado || logged.cpf_normalizado || ''),
+          authorizedAtLabel: formatDateTime(logged.authorized_at),
+          sessionDuration: formatDurationSince(logged.authorized_at),
+          ssid: logged.ssid || 'GuestTRT-Teste'
+        });
+      }
+    }
+
+    const lsid = await createPortalSession(req.query);
+    res.cookie('portal_lsid', lsid, {
+      maxAge: LOGIN_SESSION_TTL_SECONDS * 1000,
+      httpOnly: true,
+      sameSite: 'lax'
     });
+    return res.render('portal', {
+      title: 'Portal Visitantes TRT9',
+      error: null,
+      message: null,
+      lsid,
+      contextBadge: buildContextBadge(wisprCtx)
+    });
+  } catch (error) {
+    logError('portal_session_create_failed', { error });
+    return res.status(500).render('portal', { title: 'Portal Visitantes TRT9', error: 'Falha ao iniciar sessão captive.', message: null, lsid: '', contextBadge: null });
+  }
 });
 
 app.get('/register', async (req, res) => {
@@ -740,6 +796,60 @@ async function verifySmsHandler(req, res) {
 
 app.post('/verify/sms', verifySmsHandler);
 app.post('/otp/verify', verifySmsHandler);
+
+
+app.post('/logout', async (req, res) => {
+  const portalSessionUserId = String(req.cookies?.portal_session || '').trim();
+
+  try {
+    if (portalSessionUserId) {
+      const sessionQuery = await pool.query(
+        `SELECT id, user_id, nbi_ip, uip, client_mac, proxy, authorized_at
+         FROM login_sessions
+         WHERE user_id = $1 AND authorized_at IS NOT NULL
+         ORDER BY authorized_at DESC
+         LIMIT 1`,
+        [portalSessionUserId]
+      );
+
+      if (sessionQuery.rowCount > 0) {
+        const session = sessionQuery.rows[0];
+        if (session.nbi_ip && session.uip && session.client_mac) {
+          const disconnectResult = await disconnectAsync({
+            nbiIP: session.nbi_ip,
+            ueIp: session.uip,
+            ueMac: session.client_mac,
+            proxy: session.proxy || '0'
+          });
+
+          if (!disconnectResult.success) {
+            logInfo('logout_disconnect_failed', {
+              user_id: session.user_id,
+              lsid: session.id,
+              request_id: disconnectResult.requestId || null,
+              response_code: String(disconnectResult.detail?.ResponseCode || '')
+            });
+          }
+        }
+
+        await pool.query(
+          `UPDATE login_sessions
+           SET authorized_at = NULL,
+               consumed_at = NOW(),
+               stage = 'logout'
+           WHERE id = $1`,
+          [session.id]
+        );
+      }
+    }
+  } catch (error) {
+    logError('logout_failed', { user_id: portalSessionUserId || null, error });
+  }
+
+  res.clearCookie('portal_session');
+  res.clearCookie('portal_lsid');
+  return res.redirect('/portal');
+});
 
 app.get('/terms', (_, res) => {
   res.render('terms', { title: 'Termos de Uso' });

@@ -41,3 +41,7 @@ a { color: var(--primary); text-decoration: none; }
 .help-text.ok { color: var(--ok); }
 .help-text.error { color: var(--danger); }
 .legal-card p { margin-bottom: 12px; line-height: 1.5; }
+
+.session-info { margin: 14px 0 10px; }
+.session-info p { margin: 8px 0; }
+.btn-danger { background: var(--danger); }
