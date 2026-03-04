@@ -67,6 +67,13 @@ Copie `.env.example` para `.env` e ajuste:
 - `SMS_API_URL`: endpoint da API ClasseA 360 (quando `SMS_API_ENABLED=true`).
 - `SMS_API_USERNAME`, `SMS_API_PASSWORD`, `SMS_API_COD_CARTEIRA`, `SMS_API_COD_FORNECEDOR`: credenciais da ClasseA 360.
 
+- `ADMIN_ALLOWED_CIDRS`: lista de CIDRs permitidos no `/admin/*` (default: `10.9.62.0/23`).
+- `ADMIN_USER`: usuário administrador do painel.
+- `ADMIN_PASSWORD_HASH`: hash Argon2 da senha do admin.
+- `ADMIN_SESSION_TTL_HOURS`: duração da sessão administrativa em horas (default: `8`).
+- `ADMIN_LOGIN_RATE_LIMIT_PER_MINUTE`: limite de tentativas por minuto em `POST /admin/login` (default: `10`).
+- `ADMIN_SESSION_SECRET`: segredo para assinatura do cookie de sessão admin (se omitido, usa `ADMIN_PASSWORD_HASH`).
+
 No `docker-compose.yml`, o serviço `app` lê variáveis também de `env_file: .env` (além de `environment`).
 
 ---
@@ -101,6 +108,29 @@ Form de cadastro com LGPD:
 - pode renovar validade da conta ao autenticar (`RENEW_ON_LOGIN=true`)
 - chama NBI com `UE-IP` e `UE-MAC` recebidos no redirect
 - registra auditoria somente em log estruturado (stdout/arquivo)
+
+
+### `GET /admin/login`
+Tela de autenticação do painel administrativo (somente IPs permitidos por `ADMIN_ALLOWED_CIDRS`).
+
+### `POST /admin/login`
+Valida `ADMIN_USER` + `ADMIN_PASSWORD_HASH` (Argon2), aplica rate-limit forte e cria cookie `admin_session` (`httpOnly`, TTL padrão 8h).
+
+### `GET /admin`
+Página inicial administrativa com formulário de busca por CPF.
+
+### `GET /admin/lookup?cpf=<cpf>`
+Consulta `users` por `cpf_normalizado`, lista até 50 registros em `login_sessions` e exibe:
+- nome, e-mail, telefone
+- horários (`created_at`, `authorized_at`, `consumed_at`)
+- duração da sessão (`coalesce(consumed_at, now()) - coalesce(authorized_at, created_at)`)
+- status (`OPEN`, `AUTHORIZED`, `CLOSED`)
+- dados de contexto (`IP/MAC/SSID`, VLAN, AP IP)
+
+Também grava auditoria em log estruturado no evento `admin_lookup` com `cpf_normalizado`, `admin_user` e `request_ip`.
+
+### `POST /admin/logout`
+Encerra sessão administrativa limpando cookie `admin_session`.
 
 ---
 
@@ -212,3 +242,21 @@ Opções comuns:
 ## Validação no Check Point Identity Awareness
 
 Após login bem-sucedido no portal + autorização NBI, a SmartZone deve gerar accounting para o Check Point. Verifique no IA a aparição do usuário `visitante_<cpf>` associado ao IP/MAC do cliente.
+
+
+## Gerar hash da senha de administrador
+
+Use o utilitário abaixo para gerar o valor de `ADMIN_PASSWORD_HASH`:
+
+```bash
+npm run admin:hash -- "SuaSenhaForteAqui"
+```
+
+Depois configure no `.env`:
+
+```env
+ADMIN_USER=admin
+ADMIN_PASSWORD_HASH=$argon2id$...
+ADMIN_ALLOWED_CIDRS=10.9.62.0/23
+ADMIN_SESSION_TTL_HOURS=8
+```

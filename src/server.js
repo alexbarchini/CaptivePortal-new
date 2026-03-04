@@ -31,6 +31,10 @@ const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || 5);
 const OTP_RESEND_COOLDOWN_SECONDS = Number(process.env.OTP_RESEND_COOLDOWN_SECONDS || 60);
 const OTP_VALID_REUSE_WINDOW_SECONDS = Number(process.env.OTP_VALID_REUSE_WINDOW_SECONDS || 120);
 const LOGIN_SESSION_TTL_SECONDS = Number(process.env.LOGIN_SESSION_TTL_SECONDS || 600);
+const ADMIN_SESSION_COOKIE_NAME = 'admin_session';
+const ADMIN_SESSION_TTL_MS = Number(process.env.ADMIN_SESSION_TTL_HOURS || 8) * 60 * 60 * 1000;
+const ADMIN_ALLOWED_CIDRS = String(process.env.ADMIN_ALLOWED_CIDRS || '10.9.62.0/23').split(',').map((item) => item.trim()).filter(Boolean);
+const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_PASSWORD_HASH || 'admin-session-secret';
 const smsProvider = buildSmsProvider();
 
 app.set('view engine', 'ejs');
@@ -55,6 +59,7 @@ app.use('/public', express.static(path.join(__dirname, 'public')));
 
 const authLimiter = rateLimit({ windowMs: 60 * 1000, limit: Number(process.env.RATE_LIMIT_PER_MINUTE || 30), standardHeaders: true, legacyHeaders: false });
 const verifyLimiter = rateLimit({ windowMs: 60 * 1000, limit: Number(process.env.RATE_LIMIT_VERIFY_PER_MINUTE || 20), standardHeaders: true, legacyHeaders: false });
+const adminLoginLimiter = rateLimit({ windowMs: 60 * 1000, limit: Number(process.env.ADMIN_LOGIN_RATE_LIMIT_PER_MINUTE || 10), standardHeaders: true, legacyHeaders: false });
 
 app.use('/register', authLimiter);
 app.use('/login', authLimiter);
@@ -205,6 +210,69 @@ function normalizeClientIp(ip = '') {
   const value = String(ip).trim();
   if (value.startsWith('::ffff:')) return value.replace('::ffff:', '');
   return value;
+}
+
+
+function ipToInteger(ip = '') {
+  const normalized = normalizeClientIp(ip);
+  const parts = normalized.split('.');
+  if (parts.length !== 4) return null;
+  const octets = parts.map((part) => Number(part));
+  if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return null;
+  return octets.reduce((acc, octet) => ((acc << 8) + octet) >>> 0, 0);
+}
+
+function parseCidr(cidr = '') {
+  const [network, bitsRaw] = String(cidr).split('/');
+  const bits = Number(bitsRaw);
+  const networkInt = ipToInteger(network);
+  if (networkInt === null || !Number.isInteger(bits) || bits < 0 || bits > 32) return null;
+  const mask = bits === 0 ? 0 : ((0xffffffff << (32 - bits)) >>> 0);
+  return { network: (networkInt & mask) >>> 0, mask };
+}
+
+function isIpAllowedByCidrs(ip, cidrs = ADMIN_ALLOWED_CIDRS) {
+  const ipInt = ipToInteger(ip);
+  if (ipInt === null) return false;
+  return cidrs.some((cidr) => {
+    const parsed = parseCidr(cidr);
+    if (!parsed) return false;
+    return ((ipInt & parsed.mask) >>> 0) === parsed.network;
+  });
+}
+
+function signAdminSession(payload) {
+  const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = crypto.createHmac('sha256', ADMIN_SESSION_SECRET).update(data).digest('base64url');
+  return `${data}.${signature}`;
+}
+
+function parseAdminSessionToken(token = '') {
+  const value = String(token || '');
+  const [data, signature] = value.split('.');
+  if (!data || !signature) return null;
+  const expected = crypto.createHmac('sha256', ADMIN_SESSION_SECRET).update(data).digest('base64url');
+  if (signature !== expected) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(data, 'base64url').toString('utf8'));
+    if (!payload || !payload.user || !payload.exp) return null;
+    if (Date.now() > Number(payload.exp)) return null;
+    return payload;
+  } catch (_) {
+    return null;
+  }
+}
+
+function allowCidrs(req, res, next) {
+  if (isIpAllowedByCidrs(req.ip)) return next();
+  return res.status(403).send('Acesso administrativo não permitido para este IP.');
+}
+
+function requireAdminSession(req, res, next) {
+  const payload = parseAdminSessionToken(req.cookies?.[ADMIN_SESSION_COOKIE_NAME]);
+  if (!payload) return res.redirect('/admin/login');
+  req.adminSession = payload;
+  return next();
 }
 
 async function getActiveSessionByUserId(userId) {
@@ -409,6 +477,110 @@ class AuthFlowError extends Error {
 }
 
 app.get('/healthz', (_, res) => res.json({ status: 'ok' }));
+
+
+app.get('/admin/login', allowCidrs, (req, res) => {
+  res.render('admin_login', { title: 'Administração', error: null });
+});
+
+app.post('/admin/login', allowCidrs, adminLoginLimiter, async (req, res) => {
+  const adminUser = String(process.env.ADMIN_USER || '');
+  const adminPasswordHash = String(process.env.ADMIN_PASSWORD_HASH || '');
+  const providedUser = String(req.body.user || '').trim();
+  const providedPassword = String(req.body.password || '');
+
+  if (!adminUser || !adminPasswordHash) {
+    return res.status(500).render('admin_login', { title: 'Administração', error: 'Admin não configurado no ambiente.' });
+  }
+
+  const userMatches = providedUser && providedUser === adminUser;
+  const passwordMatches = userMatches ? await argon2.verify(adminPasswordHash, providedPassword) : false;
+  if (!userMatches || !passwordMatches) {
+    return res.status(401).render('admin_login', { title: 'Administração', error: 'Credenciais inválidas.' });
+  }
+
+  const token = signAdminSession({ user: adminUser, exp: Date.now() + ADMIN_SESSION_TTL_MS });
+  res.cookie(ADMIN_SESSION_COOKIE_NAME, token, {
+    maxAge: ADMIN_SESSION_TTL_MS,
+    httpOnly: true,
+    sameSite: 'lax'
+  });
+
+  return res.redirect('/admin');
+});
+
+app.get('/admin', allowCidrs, requireAdminSession, (req, res) => {
+  res.render('admin_home', { title: 'Painel Administrativo', adminUser: req.adminSession.user });
+});
+
+app.get('/admin/lookup', allowCidrs, requireAdminSession, async (req, res) => {
+  const cpfNormalized = cleanDigits(String(req.query.cpf || ''));
+  if (cpfNormalized.length !== 11) {
+    return res.status(400).render('admin_lookup', {
+      title: 'Consulta por CPF',
+      adminUser: req.adminSession.user,
+      cpf: cpfNormalized,
+      error: 'CPF inválido para consulta.',
+      user: null,
+      sessions: []
+    });
+  }
+
+  const userResult = await pool.query(
+    `SELECT id, nome, email, phone_e164, cpf_formatado, cpf_normalizado
+     FROM users
+     WHERE cpf_normalizado = $1`,
+    [cpfNormalized]
+  );
+
+  const user = userResult.rows[0] || null;
+  let sessions = [];
+
+  if (user) {
+    const sessionsResult = await pool.query(
+      `SELECT id AS lsid,
+              created_at,
+              authorized_at,
+              consumed_at,
+              uip,
+              client_mac,
+              ssid,
+              vlan,
+              apip,
+              COALESCE(consumed_at, NOW()) - COALESCE(authorized_at, created_at) AS duration
+       FROM login_sessions
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 50`,
+      [user.id]
+    );
+
+    sessions = sessionsResult.rows.map((session) => ({
+      ...session,
+      status: !session.authorized_at ? 'OPEN' : (session.consumed_at ? 'CLOSED' : 'AUTHORIZED')
+    }));
+  }
+
+  logInfo('admin_lookup', {
+    cpf_normalizado: cpfNormalized,
+    admin_user: req.adminSession.user,
+    request_ip: normalizeClientIp(req.ip)
+  });
+
+  return res.render('admin_lookup', {
+    title: 'Consulta por CPF',
+    adminUser: req.adminSession.user,
+    cpf: cpfNormalized,
+    error: null,
+    user,
+    sessions
+  });
+});
+
+app.post('/admin/logout', allowCidrs, requireAdminSession, (req, res) => {
+  res.clearCookie(ADMIN_SESSION_COOKIE_NAME);
+  return res.redirect('/admin/login');
+});
 
 app.get('/portal', async (req, res) => {
   try {

@@ -45,3 +45,8 @@ a { color: var(--primary); text-decoration: none; }
 .session-info { margin: 14px 0 10px; }
 .session-info p { margin: 8px 0; }
 .btn-danger { background: var(--danger); }
+
+
+.admin-table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: .86rem; }
+.admin-table th, .admin-table td { border: 1px solid #d8dde6; padding: 8px; text-align: left; vertical-align: top; }
+.admin-table th { background: #f3f6fb; }

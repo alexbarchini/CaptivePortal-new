@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= title %></title>
+  <link rel="stylesheet" href="/public/style.css" />
+</head>
+<body>
+  <main class="container">
+    <section class="card wide">
+      <h2>Consulta administrativa</h2>
+      <p class="subtle">Administrador: <strong><%= adminUser %></strong></p>
+      <p>
+        <a href="/admin">Voltar</a>
+      </p>
+
+      <form method="get" action="/admin/lookup">
+        <label>CPF</label>
+        <input name="cpf" required value="<%= cpf || '' %>" placeholder="000.000.000-00" />
+        <button type="submit">Pesquisar outro CPF</button>
+      </form>
+
+      <% if (error) { %>
+        <div class="alert error"><%= error %></div>
+      <% } %>
+
+      <% if (!error && !user) { %>
+        <div class="alert">Nenhum usuário encontrado para CPF <%= cpf %>.</div>
+      <% } %>
+
+      <% if (user) { %>
+        <h3>Dados do usuário</h3>
+        <p><strong>Nome:</strong> <%= user.nome %></p>
+        <p><strong>CPF:</strong> <%= user.cpf_formatado || user.cpf_normalizado %></p>
+        <p><strong>E-mail:</strong> <%= user.email %></p>
+        <p><strong>Telefone:</strong> <%= user.phone_e164 %></p>
+
+        <h3>Sessões recentes (até 50)</h3>
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>LSID</th>
+              <th>Criada em</th>
+              <th>Autorizada em</th>
+              <th>Consumida em</th>
+              <th>Duração</th>
+              <th>Status</th>
+              <th>IP</th>
+              <th>MAC</th>
+              <th>SSID</th>
+              <th>VLAN</th>
+              <th>AP IP</th>
+            </tr>
+          </thead>
+          <tbody>
+            <% sessions.forEach((session) => { %>
+              <tr>
+                <td><%= session.lsid %></td>
+                <td><%= session.created_at ? new Date(session.created_at).toLocaleString('pt-BR') : '-' %></td>
+                <td><%= session.authorized_at ? new Date(session.authorized_at).toLocaleString('pt-BR') : '-' %></td>
+                <td><%= session.consumed_at ? new Date(session.consumed_at).toLocaleString('pt-BR') : '-' %></td>
+                <td><%= session.duration || '-' %></td>
+                <td><%= session.status %></td>
+                <td><%= session.uip || '-' %></td>
+                <td><%= session.client_mac || '-' %></td>
+                <td><%= session.ssid || '-' %></td>
+                <td><%= session.vlan || '-' %></td>
+                <td><%= session.apip || '-' %></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      <% } %>
+    </section>
+  </main>
+</body>
+</html>

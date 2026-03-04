@@ -5,7 +5,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "dev": "node --watch src/server.js",
+    "admin:hash": "node scripts/generate-admin-password-hash.js"
   },
   "dependencies": {
     "argon2": "^0.41.1",
