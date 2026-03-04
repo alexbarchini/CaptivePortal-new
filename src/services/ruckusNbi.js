@@ -32,7 +32,8 @@ function responseCode(data) {
 }
 
 function isSuccess(data) {
-  return responseCode(data) === '0';
+  const code = responseCode(data);
+  return code === '0' || code === '201';
 }
 
 function isPending(data) {
@@ -41,7 +42,7 @@ function isPending(data) {
 
 function isFailure(data) {
   const code = responseCode(data);
-  return code !== '' && code !== '0' && code !== '202';
+  return code !== '' && !isSuccess(data) && !isPending(data);
 }
 
 async function postJson(url, payload) {
@@ -243,6 +244,7 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
     });
 
     if (isSuccess(statusResponse)) {
+      // Cenário validado: LoginAsync=202 e Status=201 ("Login succeeded") deve retornar success:true.
       logInfo('nbi_login_success', {
         request_id: requestId,
         nbi_ip: nbiIP,
@@ -253,41 +255,28 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
         transaction_id: statusResponse?.TransactionId || null
       });
       return { success: true, mode: 'status', detail: statusResponse, requestId };
+    } else if (isPending(statusResponse)) {
+      continue;
     }
 
-    if (isFailure(statusResponse)) {
-      logInfo('nbi_login_failed', {
-        request_id: requestId,
-        nbi_ip: nbiIP,
-        endpoint: statusResult.endpoint,
-        response_code: responseCode(statusResponse),
-        reply_message: String(statusResponse?.ReplyMessage ?? ''),
-        session_id: statusResponse?.SessionId || null,
-        transaction_id: statusResponse?.TransactionId || null
-      });
-      return { success: false, mode: 'status', detail: statusResponse, requestId };
-    }
-
-    if (!isPending(statusResponse)) {
-      logInfo('nbi_login_failed', {
-        request_id: requestId,
-        nbi_ip: nbiIP,
-        endpoint: statusResult.endpoint,
-        response_code: responseCode(statusResponse),
-        reply_message: 'Resposta sem ResponseCode definido durante polling de status.',
-        session_id: statusResponse?.SessionId || null,
-        transaction_id: statusResponse?.TransactionId || null
-      });
-      return {
-        success: false,
-        mode: 'status',
-        detail: {
-          ResponseCode: responseCode(statusResponse),
-          ReplyMessage: String(statusResponse?.ReplyMessage || 'Resposta inválida no polling de status.')
-        },
-        requestId
-      };
-    }
+    logInfo('nbi_login_failed', {
+      request_id: requestId,
+      nbi_ip: nbiIP,
+      endpoint: statusResult.endpoint,
+      response_code: responseCode(statusResponse),
+      reply_message: String(statusResponse?.ReplyMessage || 'Resposta inválida no polling de status.'),
+      session_id: statusResponse?.SessionId || null,
+      transaction_id: statusResponse?.TransactionId || null
+    });
+    return {
+      success: false,
+      mode: 'status',
+      detail: {
+        ResponseCode: responseCode(statusResponse),
+        ReplyMessage: String(statusResponse?.ReplyMessage || 'Resposta inválida no polling de status.')
+      },
+      requestId
+    };
   }
 
   const timeoutDetail = { ResponseCode: 'TIMEOUT', ReplyMessage: 'Timeout ao consultar status no NBI.' };
