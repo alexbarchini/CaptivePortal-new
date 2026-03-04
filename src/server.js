@@ -95,14 +95,22 @@ function buildCtxFromSession(session = {}) {
     login_password: session.login_password || ''
   };
 }
+function looksLikePlainMac(mac = '') {
+  const compact = String(mac || '').replace(/[^a-fA-F0-9]/g, '').toUpperCase();
+  return /^[A-F0-9]{12}$/.test(compact);
+}
 function maskMac(mac = '') {
   const value = String(mac || '');
   if (!value) return '';
   const compact = value.replace(/[^a-fA-F0-9]/g, '').toUpperCase();
-  if (compact.length < 6) return '***';
+  if (!looksLikePlainMac(value)) {
+    if (value.length <= 6) return '***';
+    return `${value.slice(0, 3)}...${value.slice(-3)}`;
+  }
   return `${compact.slice(0, 2)}:**:**:**:${compact.slice(-2)}`;
 }
-function normalizeMac(mac = '') {
+function normalizeMacIfPlain(mac = '') {
+  if (!looksLikePlainMac(mac)) return String(mac || '');
   return String(mac || '').replace(/[^a-fA-F0-9]/g, '').toUpperCase();
 }
 function resolveWisprParams(params = {}) {
@@ -172,7 +180,7 @@ async function createPortalSession(params) {
       JSON.stringify(ctx),
       ctx.nbiIP,
       ctx.uip,
-      normalizeMac(ctx.client_mac),
+      normalizeMacIfPlain(ctx.client_mac),
       ctx.proxy,
       ctx.ssid,
       ctx.sip,
@@ -239,7 +247,7 @@ async function sendOtpForUser({ userId, phoneE164, reason, ueIp = null, ueMac = 
   await pool.query(
     `INSERT INTO otp_codes (user_id, login_session_id, channel, destination, code_hash, expires_at, ue_ip, ue_mac)
      VALUES ($1, $2, 'sms', $3, $4, NOW() + ($5 || ' seconds')::interval, $6, $7)`,
-    [userId, lsid, phoneE164, codeHash, OTP_TTL_SECONDS, ueIp, normalizeMac(ueMac)]
+    [userId, lsid, phoneE164, codeHash, OTP_TTL_SECONDS, ueIp, normalizeMacIfPlain(ueMac)]
   );
 
   logInfo('otp_sent', { lsid, user_id: userId, destination: phoneE164, reason, ue_ip: ueIp, ue_mac: maskMac(ueMac) });
@@ -286,7 +294,7 @@ async function hasRecentValidOtpForContext({ userId, ueIp, ueMac }) {
        AND verified_at IS NOT NULL
        AND verified_at >= NOW() - ($4 || ' seconds')::interval
      LIMIT 1`,
-    [userId, ueIp, normalizeMac(ueMac), OTP_VALID_REUSE_WINDOW_SECONDS]
+    [userId, ueIp, normalizeMacIfPlain(ueMac), OTP_VALID_REUSE_WINDOW_SECONDS]
   );
   return result.rowCount > 0;
 }

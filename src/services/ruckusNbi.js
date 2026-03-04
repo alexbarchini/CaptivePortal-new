@@ -27,13 +27,21 @@ function getEndpoints(nbiIP) {
   ];
 }
 
-function hasSuccessCode(data) {
-  return String(data?.ResponseCode ?? '') === '0';
+function responseCode(data) {
+  return String(data?.ResponseCode ?? '');
 }
 
-function hasFailureCode(data) {
-  const code = String(data?.ResponseCode ?? '');
-  return code !== '' && code !== '0';
+function isSuccess(data) {
+  return responseCode(data) === '0';
+}
+
+function isPending(data) {
+  return responseCode(data) === '202';
+}
+
+function isFailure(data) {
+  const code = responseCode(data);
+  return code !== '' && code !== '0' && code !== '202';
 }
 
 async function postJson(url, payload) {
@@ -48,7 +56,11 @@ function maskMac(mac = '') {
   const value = String(mac || '');
   if (!value) return '';
   const compact = value.replace(/[^a-fA-F0-9]/g, '').toUpperCase();
-  if (compact.length < 6) return '***';
+  const isPlainHexMac = /^[A-F0-9]{12}$/.test(compact);
+  if (!isPlainHexMac) {
+    if (value.length <= 6) return '***';
+    return `${value.slice(0, 3)}...${value.slice(-3)}`;
+  }
   return `${compact.slice(0, 2)}:**:**:**:${compact.slice(-2)}`;
 }
 
@@ -162,18 +174,36 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
     request_id: requestId,
     nbi_ip: nbiIP,
     endpoint: loginResult.endpoint,
-    response_code: String(loginResponse?.ResponseCode ?? ''),
-    reply_message: String(loginResponse?.ReplyMessage ?? '')
+    response_code: responseCode(loginResponse),
+    reply_message: String(loginResponse?.ReplyMessage ?? ''),
+    session_id: loginResponse?.SessionId || null,
+    transaction_id: loginResponse?.TransactionId || null
   });
 
-  if (hasFailureCode(loginResponse)) {
+  if (isFailure(loginResponse)) {
     logInfo('nbi_login_failed', {
+      request_id: requestId,
       nbi_ip: nbiIP,
       endpoint: loginResult.endpoint,
-      response_code: String(loginResponse?.ResponseCode ?? ''),
-      reply_message: String(loginResponse?.ReplyMessage ?? '')
+      response_code: responseCode(loginResponse),
+      reply_message: String(loginResponse?.ReplyMessage ?? ''),
+      session_id: loginResponse?.SessionId || null,
+      transaction_id: loginResponse?.TransactionId || null
     });
     return { success: false, mode: 'login', detail: loginResponse, requestId };
+  }
+
+  if (isSuccess(loginResponse)) {
+    logInfo('nbi_login_success', {
+      request_id: requestId,
+      nbi_ip: nbiIP,
+      endpoint: loginResult.endpoint,
+      response_code: responseCode(loginResponse),
+      reply_message: String(loginResponse?.ReplyMessage ?? ''),
+      session_id: loginResponse?.SessionId || null,
+      transaction_id: loginResponse?.TransactionId || null
+    });
+    return { success: true, mode: 'login', detail: loginResponse, requestId };
   }
 
   const startedAt = Date.now();
@@ -203,35 +233,66 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
     const statusResponse = statusResult.response;
 
     logInfo('nbi_status_poll', {
+      request_id: requestId,
       nbi_ip: nbiIP,
       endpoint: statusResult.endpoint,
-      response_code: String(statusResponse?.ResponseCode ?? ''),
-      reply_message: String(statusResponse?.ReplyMessage ?? '')
+      response_code: responseCode(statusResponse),
+      reply_message: String(statusResponse?.ReplyMessage ?? ''),
+      session_id: statusResponse?.SessionId || null,
+      transaction_id: statusResponse?.TransactionId || null
     });
 
-    if (hasSuccessCode(statusResponse)) {
+    if (isSuccess(statusResponse)) {
       logInfo('nbi_login_success', {
+        request_id: requestId,
         nbi_ip: nbiIP,
         endpoint: statusResult.endpoint,
-        response_code: String(statusResponse?.ResponseCode ?? ''),
-        reply_message: String(statusResponse?.ReplyMessage ?? '')
+        response_code: responseCode(statusResponse),
+        reply_message: String(statusResponse?.ReplyMessage ?? ''),
+        session_id: statusResponse?.SessionId || null,
+        transaction_id: statusResponse?.TransactionId || null
       });
       return { success: true, mode: 'status', detail: statusResponse, requestId };
     }
 
-    if (hasFailureCode(statusResponse)) {
+    if (isFailure(statusResponse)) {
       logInfo('nbi_login_failed', {
+        request_id: requestId,
         nbi_ip: nbiIP,
         endpoint: statusResult.endpoint,
-        response_code: String(statusResponse?.ResponseCode ?? ''),
-        reply_message: String(statusResponse?.ReplyMessage ?? '')
+        response_code: responseCode(statusResponse),
+        reply_message: String(statusResponse?.ReplyMessage ?? ''),
+        session_id: statusResponse?.SessionId || null,
+        transaction_id: statusResponse?.TransactionId || null
       });
       return { success: false, mode: 'status', detail: statusResponse, requestId };
+    }
+
+    if (!isPending(statusResponse)) {
+      logInfo('nbi_login_failed', {
+        request_id: requestId,
+        nbi_ip: nbiIP,
+        endpoint: statusResult.endpoint,
+        response_code: responseCode(statusResponse),
+        reply_message: 'Resposta sem ResponseCode definido durante polling de status.',
+        session_id: statusResponse?.SessionId || null,
+        transaction_id: statusResponse?.TransactionId || null
+      });
+      return {
+        success: false,
+        mode: 'status',
+        detail: {
+          ResponseCode: responseCode(statusResponse),
+          ReplyMessage: String(statusResponse?.ReplyMessage || 'Resposta inválida no polling de status.')
+        },
+        requestId
+      };
     }
   }
 
   const timeoutDetail = { ResponseCode: 'TIMEOUT', ReplyMessage: 'Timeout ao consultar status no NBI.' };
   logInfo('nbi_login_failed', {
+    request_id: requestId,
     nbi_ip: nbiIP,
     response_code: timeoutDetail.ResponseCode,
     reply_message: timeoutDetail.ReplyMessage
