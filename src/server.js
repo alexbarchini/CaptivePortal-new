@@ -412,12 +412,45 @@ app.get('/healthz', (_, res) => res.json({ status: 'ok' }));
 
 app.get('/portal', async (req, res) => {
   try {
+    const wisprCtx = pickWisprParams(req.query);
+    if (hasRequiredWispr(wisprCtx)) {
+      const lsid = await createPortalSession(req.query);
+      res.cookie('portal_lsid', lsid, {
+        maxAge: LOGIN_SESSION_TTL_SECONDS * 1000,
+        httpOnly: true,
+        sameSite: 'lax'
+      });
+      return res.render('portal', {
+        title: 'Portal Visitantes TRT9',
+        error: null,
+        message: null,
+        lsid,
+        contextBadge: buildContextBadge(wisprCtx)
+      });
+    }
+
     const portalSessionUserId = String(req.cookies?.portal_session || '').trim();
     const clientIp = normalizeClientIp(req.ip);
 
+    const portalSessionUserIdNumber = Number(portalSessionUserId);
+    const hasValidUserIdCookie = Boolean(
+      portalSessionUserId &&
+      Number.isInteger(portalSessionUserIdNumber) &&
+      portalSessionUserIdNumber > 0
+    );
+
+    if (!hasValidUserIdCookie) {
+      logInfo('portal_ctx_missing_blocked', { request_ip: req.ip, params: sanitizeParams(wisprCtx) });
+      return renderInvalidAccess(res, {
+        title: 'Acesso inválido',
+        statusCode: 400,
+        message: 'Conecte-se ao Wi‑Fi de visitantes e abra qualquer site para ser redirecionado automaticamente ao portal.'
+      });
+    }
+
     let activeSession = null;
-    if (portalSessionUserId) {
-      activeSession = await getActiveSessionByUserId(portalSessionUserId);
+    if (hasValidUserIdCookie) {
+      activeSession = await getActiveSessionByUserId(portalSessionUserIdNumber);
     }
     if (!activeSession && clientIp) {
       activeSession = await getActiveSessionByIp(clientIp);
@@ -425,8 +458,8 @@ app.get('/portal', async (req, res) => {
 
     if (activeSession) {
       await touchActiveSession(activeSession.id);
-      return res.render('logged_in', {
-        title: 'Usuário conectado',
+      return res.render('status', {
+        title: 'Status da conexão',
         userName: activeSession.nome || 'Visitante',
         cpfMasked: maskCpf(activeSession.cpf_formatado || activeSession.cpf_normalizado || ''),
         authorizedAtLabel: formatDateTime(activeSession.authorized_at),
@@ -437,28 +470,10 @@ app.get('/portal', async (req, res) => {
       });
     }
 
-    const wisprCtx = pickWisprParams(req.query);
-    if (!hasRequiredWispr(wisprCtx)) {
-      logInfo('portal_ctx_missing_blocked', { request_ip: req.ip, params: sanitizeParams(wisprCtx) });
-      return renderInvalidAccess(res, {
-        title: 'Acesso inválido',
-        statusCode: 400,
-        message: 'Conecte-se ao Wi‑Fi de visitantes e abra qualquer site para ser redirecionado automaticamente ao portal.'
-      });
-    }
-
-    const lsid = await createPortalSession(req.query);
-    res.cookie('portal_lsid', lsid, {
-      maxAge: LOGIN_SESSION_TTL_SECONDS * 1000,
-      httpOnly: true,
-      sameSite: 'lax'
-    });
-    return res.render('portal', {
-      title: 'Portal Visitantes TRT9',
-      error: null,
-      message: null,
-      lsid,
-      contextBadge: buildContextBadge(wisprCtx)
+    return renderInvalidAccess(res, {
+      title: 'Acesso inválido',
+      statusCode: 400,
+      message: 'Conecte-se ao Wi‑Fi de visitantes e abra qualquer site para ser redirecionado automaticamente ao portal.'
     });
   } catch (error) {
     logError('portal_session_create_failed', { error });
@@ -902,6 +917,13 @@ app.post('/logout', async (req, res) => {
              last_seen_at = NOW()
          WHERE id = $1`,
         [activeSession.id]
+      );
+      await pool.query(
+        `UPDATE login_sessions
+         SET consumed_at = COALESCE(consumed_at, NOW())
+         WHERE user_id = $1
+           AND authorized_at IS NOT NULL`,
+        [activeSession.user_id]
       );
     }
   } catch (error) {
