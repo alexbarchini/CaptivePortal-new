@@ -33,17 +33,13 @@ function responseCode(data) {
 
 function isSuccess(data) {
   const code = responseCode(data);
-  return code === '0' || code === '201';
+  return code === '0' || code === '101' || code === '201';
 }
 
 function isPending(data) {
   return responseCode(data) === '202';
 }
 
-function isFailure(data) {
-  const code = responseCode(data);
-  return code !== '' && !isSuccess(data) && !isPending(data);
-}
 
 async function postJson(url, payload) {
   return axios.post(url, payload, {
@@ -181,19 +177,6 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
     transaction_id: loginResponse?.TransactionId || null
   });
 
-  if (isFailure(loginResponse)) {
-    logInfo('nbi_login_failed', {
-      request_id: requestId,
-      nbi_ip: nbiIP,
-      endpoint: loginResult.endpoint,
-      response_code: responseCode(loginResponse),
-      reply_message: String(loginResponse?.ReplyMessage ?? ''),
-      session_id: loginResponse?.SessionId || null,
-      transaction_id: loginResponse?.TransactionId || null
-    });
-    return { success: false, mode: 'login', detail: loginResponse, requestId };
-  }
-
   if (isSuccess(loginResponse)) {
     logInfo('nbi_login_success', {
       request_id: requestId,
@@ -205,6 +188,19 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
       transaction_id: loginResponse?.TransactionId || null
     });
     return { success: true, mode: 'login', detail: loginResponse, requestId };
+  }
+
+  if (!isPending(loginResponse)) {
+    logInfo('nbi_login_failed', {
+      request_id: requestId,
+      nbi_ip: nbiIP,
+      endpoint: loginResult.endpoint,
+      response_code: responseCode(loginResponse),
+      reply_message: String(loginResponse?.ReplyMessage ?? ''),
+      session_id: loginResponse?.SessionId || null,
+      transaction_id: loginResponse?.TransactionId || null
+    });
+    return { success: false, mode: 'login', detail: loginResponse, requestId };
   }
 
   const startedAt = Date.now();
