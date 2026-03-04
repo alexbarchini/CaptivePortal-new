@@ -33,11 +33,16 @@ function responseCode(data) {
 
 function isSuccess(data) {
   const code = responseCode(data);
-  return code === '0' || code === '101' || code === '201';
+  return code === '101' || code === '201';
 }
 
 function isPending(data) {
   return responseCode(data) === '202';
+}
+
+function isFailed(data) {
+  const code = Number(responseCode(data));
+  return Number.isFinite(code) && code >= 301;
 }
 
 
@@ -190,7 +195,7 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
     return { success: true, mode: 'login', detail: loginResponse, requestId };
   }
 
-  if (!isPending(loginResponse)) {
+  if (!isPending(loginResponse) || isFailed(loginResponse)) {
     logInfo('nbi_login_failed', {
       request_id: requestId,
       nbi_ip: nbiIP,
@@ -286,7 +291,7 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
   return { success: false, mode: 'timeout', detail: timeoutDetail, requestId };
 }
 
-async function disconnectAsync({ nbiIP, ueIp, ueMac, proxy }) {
+async function disconnectAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername }) {
   if (process.env.NBI_MOCK === 'true') {
     return { success: true, mode: 'mock', detail: { ReplyMessage: 'NBI mock habilitado.' } };
   }
@@ -297,7 +302,8 @@ async function disconnectAsync({ nbiIP, ueIp, ueMac, proxy }) {
     RequestType: 'Disconnect',
     'UE-IP': ueIp,
     'UE-MAC': ueMac,
-    'UE-Proxy': proxy || '0'
+    'UE-Proxy': proxy || '0',
+    ...(ueUsername ? { 'UE-Username': ueUsername } : {})
   };
 
   const disconnectResult = await postWithFallback({
@@ -307,7 +313,8 @@ async function disconnectAsync({ nbiIP, ueIp, ueMac, proxy }) {
     requestId,
     ueIp,
     ueMac,
-    proxy
+    proxy,
+    ueUsername
   });
   const disconnectResponse = disconnectResult.response;
 

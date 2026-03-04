@@ -21,6 +21,7 @@ const { buildSmsProvider } = require('./services/smsProvider');
 const { logInfo, logError, LOG_TZ, AUTH_LOG_FILE_PATH } = require('./utils/logger');
 
 const app = express();
+const TRUST_PROXY = (process.env.TRUST_PROXY || 'true').toLowerCase() !== 'false';
 const PORT = Number(process.env.PORT || 3000);
 const USER_ACCOUNT_VALIDITY_DAYS = Number(process.env.USER_ACCOUNT_VALIDITY_DAYS || 30);
 const RENEW_ON_LOGIN = (process.env.RENEW_ON_LOGIN || 'true').toLowerCase() !== 'false';
@@ -34,6 +35,7 @@ const smsProvider = buildSmsProvider();
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
+if (TRUST_PROXY) app.set('trust proxy', true);
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.urlencoded({ extended: false }));
@@ -196,6 +198,48 @@ function formatDurationSince(value) {
   if (hours <= 0) return `${minutes} minuto${minutes === 1 ? '' : 's'}`;
   if (minutes === 0) return `${hours} hora${hours === 1 ? '' : 's'}`;
   return `${hours} hora${hours === 1 ? '' : 's'} e ${minutes} minuto${minutes === 1 ? '' : 's'}`;
+}
+
+function normalizeClientIp(ip = '') {
+  if (!ip) return '';
+  const value = String(ip).trim();
+  if (value.startsWith('::ffff:')) return value.replace('::ffff:', '');
+  return value;
+}
+
+async function getActiveSessionByUserId(userId) {
+  if (!userId) return null;
+  const result = await pool.query(
+    `SELECT pas.id, pas.user_id, pas.ue_ip, pas.ue_mac, pas.ssid, pas.authorized_at, pas.last_seen_at,
+            u.nome, u.cpf_formatado, u.cpf_normalizado
+     FROM portal_active_sessions pas
+     JOIN users u ON u.id = pas.user_id
+     WHERE pas.user_id = $1 AND pas.ended_at IS NULL
+     ORDER BY pas.authorized_at DESC
+     LIMIT 1`,
+    [userId]
+  );
+  return result.rows[0] || null;
+}
+
+async function getActiveSessionByIp(clientIp) {
+  if (!clientIp) return null;
+  const result = await pool.query(
+    `SELECT pas.id, pas.user_id, pas.ue_ip, pas.ue_mac, pas.ssid, pas.authorized_at, pas.last_seen_at,
+            u.nome, u.cpf_formatado, u.cpf_normalizado
+     FROM portal_active_sessions pas
+     JOIN users u ON u.id = pas.user_id
+     WHERE pas.ue_ip = $1 AND pas.ended_at IS NULL
+     ORDER BY pas.authorized_at DESC
+     LIMIT 1`,
+    [clientIp]
+  );
+  return result.rows[0] || null;
+}
+
+async function touchActiveSession(sessionId) {
+  if (!sessionId) return;
+  await pool.query(`UPDATE portal_active_sessions SET last_seen_at = NOW() WHERE id = $1`, [sessionId]);
 }
 
 async function createPortalSession(params) {
@@ -367,40 +411,40 @@ class AuthFlowError extends Error {
 app.get('/healthz', (_, res) => res.json({ status: 'ok' }));
 
 app.get('/portal', async (req, res) => {
-  const wisprCtx = pickWisprParams(req.query);
-  if (!hasRequiredWispr(wisprCtx)) {
-    logInfo('portal_ctx_missing_blocked', { request_ip: req.ip, params: sanitizeParams(wisprCtx) });
-    return renderInvalidAccess(res, {
-      title: 'Acesso inválido',
-      statusCode: 400,
-      message: 'Conecte-se ao Wi‑Fi de visitantes e abra qualquer site para ser redirecionado automaticamente ao portal.'
-    });
-  }
-
   try {
     const portalSessionUserId = String(req.cookies?.portal_session || '').trim();
-    if (portalSessionUserId) {
-      const activeLogin = await pool.query(
-        `SELECT ls.id, ls.authorized_at, ls.nbi_ip, ls.uip, ls.client_mac, ls.proxy, ls.ssid, u.nome, u.cpf_formatado, u.cpf_normalizado
-         FROM login_sessions ls
-         JOIN users u ON u.id = ls.user_id
-         WHERE ls.user_id = $1 AND ls.authorized_at IS NOT NULL
-         ORDER BY ls.authorized_at DESC
-         LIMIT 1`,
-        [portalSessionUserId]
-      );
+    const clientIp = normalizeClientIp(req.ip);
 
-      if (activeLogin.rowCount > 0) {
-        const logged = activeLogin.rows[0];
-        return res.render('logged_in', {
-          title: 'Sessão ativa',
-          userName: logged.nome || 'Visitante',
-          cpfMasked: maskCpf(logged.cpf_formatado || logged.cpf_normalizado || ''),
-          authorizedAtLabel: formatDateTime(logged.authorized_at),
-          sessionDuration: formatDurationSince(logged.authorized_at),
-          ssid: logged.ssid || 'GuestTRT-Teste'
-        });
-      }
+    let activeSession = null;
+    if (portalSessionUserId) {
+      activeSession = await getActiveSessionByUserId(portalSessionUserId);
+    }
+    if (!activeSession && clientIp) {
+      activeSession = await getActiveSessionByIp(clientIp);
+    }
+
+    if (activeSession) {
+      await touchActiveSession(activeSession.id);
+      return res.render('logged_in', {
+        title: 'Usuário conectado',
+        userName: activeSession.nome || 'Visitante',
+        cpfMasked: maskCpf(activeSession.cpf_formatado || activeSession.cpf_normalizado || ''),
+        authorizedAtLabel: formatDateTime(activeSession.authorized_at),
+        sessionDuration: formatDurationSince(activeSession.authorized_at),
+        ssid: activeSession.ssid || 'GuestTRT-Teste',
+        ueIp: activeSession.ue_ip || clientIp || '-',
+        macMasked: maskMac(activeSession.ue_mac || '')
+      });
+    }
+
+    const wisprCtx = pickWisprParams(req.query);
+    if (!hasRequiredWispr(wisprCtx)) {
+      logInfo('portal_ctx_missing_blocked', { request_ip: req.ip, params: sanitizeParams(wisprCtx) });
+      return renderInvalidAccess(res, {
+        title: 'Acesso inválido',
+        statusCode: 400,
+        message: 'Conecte-se ao Wi‑Fi de visitantes e abra qualquer site para ser redirecionado automaticamente ao portal.'
+      });
     }
 
     const lsid = await createPortalSession(req.query);
@@ -764,6 +808,16 @@ async function verifySmsHandler(req, res) {
     }
 
     await pool.query(`UPDATE login_sessions SET consumed_at = NOW(), authorized_at = NOW() WHERE id = $1`, [session.id]);
+    await pool.query(
+      `INSERT INTO portal_active_sessions (id, user_id, ue_ip, ue_mac, ssid, authorized_at, ended_at, last_seen_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW(), NULL, NOW(), NOW())
+       ON CONFLICT (user_id, ue_ip, ue_mac) DO UPDATE SET
+         ssid = EXCLUDED.ssid,
+         authorized_at = NOW(),
+         ended_at = NULL,
+         last_seen_at = NOW()`,
+      [crypto.randomUUID(), session.user_id, userIp, normalizeMacIfPlain(userMac), ctx.ssid || null]
+    );
     res.cookie('portal_session', String(session.user_id), { maxAge: SESSION_MAX_AGE_MS, httpOnly: true, sameSite: 'lax' });
 
     logInfo('authorize_flow_success', { lsid: session.id, user_id: session.user_id, request_id: nbiResult.requestId || null });
@@ -800,50 +854,58 @@ app.post('/otp/verify', verifySmsHandler);
 
 app.post('/logout', async (req, res) => {
   const portalSessionUserId = String(req.cookies?.portal_session || '').trim();
+  const clientIp = normalizeClientIp(req.ip);
 
   try {
+    let activeSession = null;
     if (portalSessionUserId) {
+      activeSession = await getActiveSessionByUserId(portalSessionUserId);
+    }
+    if (!activeSession && clientIp) {
+      activeSession = await getActiveSessionByIp(clientIp);
+    }
+
+    if (activeSession) {
       const sessionQuery = await pool.query(
-        `SELECT id, user_id, nbi_ip, uip, client_mac, proxy, authorized_at
-         FROM login_sessions
-         WHERE user_id = $1 AND authorized_at IS NOT NULL
-         ORDER BY authorized_at DESC
+        `SELECT ls.nbi_ip, ls.proxy, u.username_radius, u.cpf_normalizado
+         FROM login_sessions ls
+         JOIN users u ON u.id = ls.user_id
+         WHERE ls.user_id = $1
+         ORDER BY ls.authorized_at DESC NULLS LAST, ls.created_at DESC
          LIMIT 1`,
-        [portalSessionUserId]
+        [activeSession.user_id]
       );
+      const latestLogin = sessionQuery.rows[0] || {};
 
-      if (sessionQuery.rowCount > 0) {
-        const session = sessionQuery.rows[0];
-        if (session.nbi_ip && session.uip && session.client_mac) {
-          const disconnectResult = await disconnectAsync({
-            nbiIP: session.nbi_ip,
-            ueIp: session.uip,
-            ueMac: session.client_mac,
-            proxy: session.proxy || '0'
+      if (latestLogin.nbi_ip && activeSession.ue_ip && activeSession.ue_mac) {
+        const disconnectResult = await disconnectAsync({
+          nbiIP: latestLogin.nbi_ip,
+          ueIp: activeSession.ue_ip,
+          ueMac: activeSession.ue_mac,
+          proxy: latestLogin.proxy || '0',
+          ueUsername: latestLogin.username_radius || `visitante_${latestLogin.cpf_normalizado || ''}`
+        });
+
+        if (!disconnectResult.success) {
+          logInfo('logout_disconnect_failed', {
+            user_id: activeSession.user_id,
+            portal_active_session_id: activeSession.id,
+            request_id: disconnectResult.requestId || null,
+            response_code: String(disconnectResult.detail?.ResponseCode || '')
           });
-
-          if (!disconnectResult.success) {
-            logInfo('logout_disconnect_failed', {
-              user_id: session.user_id,
-              lsid: session.id,
-              request_id: disconnectResult.requestId || null,
-              response_code: String(disconnectResult.detail?.ResponseCode || '')
-            });
-          }
         }
-
-        await pool.query(
-          `UPDATE login_sessions
-           SET authorized_at = NULL,
-               consumed_at = NOW(),
-               stage = 'logout'
-           WHERE id = $1`,
-          [session.id]
-        );
       }
+
+      await pool.query(
+        `UPDATE portal_active_sessions
+         SET ended_at = NOW(),
+             last_seen_at = NOW()
+         WHERE id = $1`,
+        [activeSession.id]
+      );
     }
   } catch (error) {
-    logError('logout_failed', { user_id: portalSessionUserId || null, error });
+    logError('logout_failed', { user_id: portalSessionUserId || null, request_ip: clientIp || null, error });
   }
 
   res.clearCookie('portal_session');

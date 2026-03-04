@@ -14,13 +14,16 @@
   </header>
   <main class="container">
     <section class="card">
-      <h2>Você está conectado à rede <%= ssid %></h2>
+      <h2>Usuário conectado</h2>
 
       <div class="session-info">
         <p><strong>Usuário:</strong> <%= userName %></p>
         <p><strong>CPF:</strong> <%= cpfMasked %></p>
+        <p><strong>SSID:</strong> <%= ssid %></p>
+        <p><strong>IP:</strong> <%= ueIp %></p>
+        <p><strong>MAC:</strong> <%= macMasked %></p>
         <p><strong>Conectado desde:</strong> <%= authorizedAtLabel %></p>
-        <p><strong>Duração da sessão:</strong> <%= sessionDuration %></p>
+        <p><strong>Tempo conectado:</strong> <%= sessionDuration %></p>
       </div>
 
       <form method="post" action="/logout">
