@@ -806,6 +806,7 @@ app.get('/admin/sessions', async (req, res) => {
     `SELECT ls.id AS lsid,
             ls.created_at,
             ls.authorized_at,
+            ls.otp_verified_at,
             ls.consumed_at,
             ls.uip,
             ls.client_mac,
@@ -1296,6 +1297,12 @@ async function verifySmsHandler(req, res) {
     }
 
     await pool.query(`UPDATE otp_codes SET verified_at = NOW() WHERE id = $1`, [otp.id]);
+    await pool.query(
+      `UPDATE login_sessions
+       SET otp_verified_at = COALESCE(otp_verified_at, NOW())
+       WHERE id = $1`,
+      [session.id]
+    );
     await pool.query(
       `INSERT INTO user_verifications (user_id, phone_verified_at)
        VALUES ($1, NOW())

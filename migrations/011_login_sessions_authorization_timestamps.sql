@@ -1,0 +1,4 @@
+ALTER TABLE login_sessions
+  ADD COLUMN IF NOT EXISTS authorized_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS otp_verified_at TIMESTAMPTZ;
+
