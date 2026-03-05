@@ -797,7 +797,7 @@ app.get('/admin/sessions', async (req, res) => {
       values.push(status);
       return `$${values.length}`;
     });
-    filters.push(`(CASE WHEN ls.consumed_at IS NULL THEN 'open' ELSE 'closed' END) IN (${placeholders.join(', ')})`);
+    filters.push(`LOWER(ls.status) IN (${placeholders.join(', ')})`);
   }
 
   values.push(51, offset);
@@ -806,6 +806,9 @@ app.get('/admin/sessions', async (req, res) => {
     `SELECT ls.id AS lsid,
             ls.created_at,
             ls.authorized_at,
+            ls.status,
+            ls.closed_at,
+            ls.updated_at,
             ls.otp_verified_at,
             ls.consumed_at,
             ls.uip,
@@ -819,7 +822,12 @@ app.get('/admin/sessions', async (req, res) => {
             u.nome,
             u.cpf_formatado,
             u.cpf_normalizado,
-            EXTRACT(EPOCH FROM (COALESCE(ls.consumed_at, NOW()) - COALESCE(ls.authorized_at, ls.created_at)))::int AS duration_seconds
+            CASE
+              WHEN ls.authorized_at IS NULL THEN NULL
+              WHEN ls.status = 'OPEN' THEN EXTRACT(EPOCH FROM (NOW() - ls.authorized_at))::int
+              WHEN ls.status = 'CLOSED' THEN EXTRACT(EPOCH FROM (COALESCE(ls.closed_at, ls.updated_at) - ls.authorized_at))::int
+              ELSE NULL
+            END AS duration_seconds
      FROM login_sessions ls
      JOIN users u ON u.id = ls.user_id
      ${whereClause}
@@ -832,7 +840,7 @@ app.get('/admin/sessions', async (req, res) => {
   const hasNextPage = sessionsResult.rows.length > 50;
   const sessions = sessionsResult.rows.slice(0, 50).map((session) => ({
     ...session,
-    status: session.consumed_at ? 'CLOSED' : 'OPEN',
+    status: session.status || (session.consumed_at ? 'CLOSED' : 'OPEN'),
     duration_hms: formatDurationHms(session.duration_seconds),
     created_at_label: formatDateTime(session.created_at),
     authorized_at_label: formatDateTime(session.authorized_at),
