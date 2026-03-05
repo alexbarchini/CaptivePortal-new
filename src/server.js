@@ -16,7 +16,7 @@ const {
   cleanDigits,
   formatCPF
 } = require('./utils/validators');
-const { loginAsync, disconnectAsync, statusAsync } = require('./services/ruckusNbi');
+const { loginAsync, disconnectAsync, statusAsync, isRetryableNbiError } = require('./services/ruckusNbi');
 const { buildSmsProvider } = require('./services/smsProvider');
 const { enforceMaxOpenSessions, closeStaleAuthorizedOpenSessions } = require('./services/sessionCleanup');
 const { logInfo, logError, LOG_TZ, AUTH_LOG_FILE_PATH } = require('./utils/logger');
@@ -39,6 +39,83 @@ const ADMIN_ALLOWED_CIDRS = String(process.env.ADMIN_ALLOWED_CIDRS || '10.9.62.0
 const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_PASSWORD_HASH || 'admin-session-secret';
 const smsProvider = buildSmsProvider();
 const DISPLAY_TIME_ZONE = 'America/Sao_Paulo';
+const SMARTZONE_HOSTS = [
+  ...new Set(
+    String(process.env.SZ_MANAGEMENT_IPS || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+  )
+];
+if (process.env.SZ_MANAGEMENT_IP && !SMARTZONE_HOSTS.includes(process.env.SZ_MANAGEMENT_IP)) {
+  SMARTZONE_HOSTS.push(process.env.SZ_MANAGEMENT_IP);
+}
+
+function isAllowedSmartZoneHost(host = '') {
+  return Boolean(host) && SMARTZONE_HOSTS.includes(String(host).trim());
+}
+
+function normalizeNbiIpCandidate(value = '') {
+  const candidate = String(value || '').trim();
+  if (!candidate) return '';
+  return isAllowedSmartZoneHost(candidate) ? candidate : '';
+}
+
+async function pickSmartZoneHost(ctx = {}, action = async () => null) {
+  const rawNbiIp = String(ctx.nbiIP || '').trim();
+  const preferredHost = normalizeNbiIpCandidate(rawNbiIp);
+  const ignoredUnlistedNbiIp = Boolean(rawNbiIp && !preferredHost);
+  const hosts = [];
+
+  if (preferredHost) hosts.push(preferredHost);
+  for (const host of SMARTZONE_HOSTS) {
+    if (!hosts.includes(host)) hosts.push(host);
+  }
+
+  if (hosts.length === 0) {
+    throw new AuthFlowError(
+      'SmartZone hosts não configurados.',
+      'Infraestrutura SmartZone indisponível no portal.',
+      500,
+      'smartzone_hosts_missing'
+    );
+  }
+
+  let lastError = null;
+  let usedHost = null;
+
+  for (let index = 0; index < hosts.length; index += 1) {
+    const host = hosts[index];
+    usedHost = host;
+
+    try {
+      const result = await action(host);
+      const didFailover = index > 0;
+      logInfo('smartzone_host_selected', {
+        requested_nbi_ip: rawNbiIp || null,
+        ignored_unlisted_nbi_ip: ignoredUnlistedNbiIp,
+        selected_host: host,
+        did_failover: didFailover,
+        attempts: index + 1
+      });
+      return { host, result, didFailover };
+    } catch (error) {
+      lastError = error;
+      const shouldRetry = isRetryableNbiError(error) && index < hosts.length - 1;
+      logError('smartzone_host_attempt_failed', {
+        requested_nbi_ip: rawNbiIp || null,
+        attempted_host: host,
+        will_retry: shouldRetry,
+        remaining_hosts: hosts.length - index - 1,
+        error
+      });
+      if (!shouldRetry) throw error;
+    }
+  }
+
+  if (lastError) throw lastError;
+  throw new Error(`Falha ao selecionar host SmartZone. último host=${usedHost || 'n/a'}`);
+}
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
@@ -179,7 +256,7 @@ function resolveWisprParams(params = {}) {
   const userIp = params.uip || params['UE-IP'] || params.client_ip;
   const userMac = params.client_mac || params['UE-MAC'];
   const proxy = params.proxy || '0';
-  const nbiIP = params.nbiIP;
+  const nbiIP = normalizeNbiIpCandidate(params.nbiIP);
   return { userIp, userMac, proxy, nbiIP };
 }
 function hasRequiredWispr(ctx = {}) {
@@ -188,7 +265,7 @@ function hasRequiredWispr(ctx = {}) {
 function pickWisprParams(raw = {}) {
   const params = normalizeBodyFields(raw);
   return {
-    nbiIP: params.nbiIP || '',
+    nbiIP: normalizeNbiIpCandidate(params.nbiIP),
     uip: params.uip || params['UE-IP'] || params.client_ip || '',
     client_mac: params.client_mac || params['UE-MAC'] || '',
     proxy: params.proxy || '0',
@@ -427,7 +504,7 @@ async function resolvePortalStatusFromWispr(ctx = {}) {
   const normalizedIp = normalizeClientIp(wispr.userIp);
   const normalizedMac = normalizeMacIfPlain(wispr.userMac);
 
-  if (!wispr.nbiIP || !normalizedIp || !normalizedMac) {
+  if (!normalizedIp || !normalizedMac) {
     return { authorized: false, reason: 'missing_required_wispr' };
   }
 
@@ -435,14 +512,15 @@ async function resolvePortalStatusFromWispr(ctx = {}) {
 
   if (dbSession) {
     try {
-      const nbiResult = await statusAsync({
-        nbiIP: wispr.nbiIP,
+      const pick = await pickSmartZoneHost({ nbiIP: wispr.nbiIP }, (selectedHost) => statusAsync({
+        nbiIP: selectedHost,
         ueIp: normalizedIp,
         ueMac: normalizedMac,
         proxy: wispr.proxy || dbSession.proxy || '0',
         ueUsername: dbSession.username_radius,
         uePassword: dbSession.login_password || undefined
-      });
+      }));
+      const nbiResult = pick.result;
 
       const responseCode = String(nbiResult.detail?.ResponseCode || '');
       if (nbiResult.success) {
@@ -461,7 +539,7 @@ async function resolvePortalStatusFromWispr(ctx = {}) {
       logError('portal_status_nbi_failed', {
         ue_ip: normalizedIp,
         ue_mac: maskMac(normalizedMac),
-        nbi_ip: wispr.nbiIP,
+        nbi_ip: wispr.nbiIP || null,
         error
       });
     }
@@ -658,7 +736,7 @@ async function hasRecentValidOtpForContext({ userId, ueIp, ueMac }) {
 
 async function authorizeViaNbi(ctx, user) {
   const { userIp, userMac, proxy, nbiIP } = resolveWisprParams(ctx);
-  if (!userIp || !userMac || !nbiIP) {
+  if (!userIp || !userMac) {
     throw new AuthFlowError(
       'Parâmetros WISPr ausentes.',
       'Acesse o portal a partir do Wi-Fi visitante (redirect captive).',
@@ -667,16 +745,22 @@ async function authorizeViaNbi(ctx, user) {
     );
   }
 
-  logInfo('wispr_params_received', { lsid: user.sessionId, user_id: user.userId, user_ip: userIp, user_mac: maskMac(userMac), proxy, nbi_ip: nbiIP });
+  logInfo('wispr_params_received', { lsid: user.sessionId, user_id: user.userId, user_ip: userIp, user_mac: maskMac(userMac), proxy, nbi_ip: nbiIP || null });
 
-  return loginAsync({
-    nbiIP,
+  const pick = await pickSmartZoneHost({ nbiIP }, (selectedHost) => loginAsync({
+    nbiIP: selectedHost,
     ueIp: userIp,
     ueMac: userMac,
     proxy,
     ueUsername: user.usernameRadius || `visitante_${user.cpf}`,
     uePassword: ctx.login_password || ''
-  });
+  }));
+
+  return {
+    ...pick.result,
+    nbiIP: pick.host,
+    failoverUsed: pick.didFailover
+  };
 }
 
 class AuthFlowError extends Error {
@@ -1352,11 +1436,13 @@ async function verifySmsHandler(req, res) {
     await pool.query(
       `UPDATE login_sessions
        SET authorized_at = COALESCE(authorized_at, NOW()),
-           device_type = $2,
-           device_name = COALESCE($3, device_name),
-           user_agent = COALESCE(NULLIF($4, ''), user_agent)
+           sz_nbi_ip = $2,
+           last_sz_nbi_ip = COALESCE(sz_nbi_ip, $2),
+           device_type = $3,
+           device_name = COALESCE($4, device_name),
+           user_agent = COALESCE(NULLIF($5, ''), user_agent)
        WHERE id = $1`,
-      [session.id, deviceType, deviceName, req.get('user-agent') || '']
+      [session.id, nbiResult.nbiIP || null, deviceType, deviceName, req.get('user-agent') || '']
     );
     await pool.query(
       `INSERT INTO portal_active_sessions (id, user_id, ue_ip, ue_mac, ssid, authorized_at, ended_at, last_seen_at, created_at)
@@ -1370,7 +1456,7 @@ async function verifySmsHandler(req, res) {
     );
     res.cookie('portal_session', String(session.user_id), { maxAge: SESSION_MAX_AGE_MS, httpOnly: true, sameSite: 'lax' });
 
-    logInfo('authorize_flow_success', { lsid: session.id, user_id: session.user_id, request_id: nbiResult.requestId || null });
+    logInfo('authorize_flow_success', { lsid: session.id, user_id: session.user_id, request_id: nbiResult.requestId || null, nbi_ip: nbiResult.nbiIP || null, failover_used: Boolean(nbiResult.failoverUsed) });
     return res.redirect(getOriginalUrl(ctx));
   } catch (error) {
     logError('otp_verify_error', { lsid, error });

@@ -1,0 +1,3 @@
+ALTER TABLE login_sessions
+  ADD COLUMN IF NOT EXISTS sz_nbi_ip VARCHAR(64),
+  ADD COLUMN IF NOT EXISTS last_sz_nbi_ip VARCHAR(64);
