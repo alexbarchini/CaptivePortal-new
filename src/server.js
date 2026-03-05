@@ -16,7 +16,7 @@ const {
   cleanDigits,
   formatCPF
 } = require('./utils/validators');
-const { loginAsync, disconnectAsync } = require('./services/ruckusNbi');
+const { loginAsync, disconnectAsync, statusAsync } = require('./services/ruckusNbi');
 const { buildSmsProvider } = require('./services/smsProvider');
 const { enforceMaxOpenSessions, closeStaleAuthorizedOpenSessions } = require('./services/sessionCleanup');
 const { logInfo, logError, LOG_TZ, AUTH_LOG_FILE_PATH } = require('./utils/logger');
@@ -345,9 +345,126 @@ async function getActiveSessionByIp(clientIp) {
   return result.rows[0] || null;
 }
 
+async function getActiveSessionByMac(clientMac) {
+  const normalizedMac = normalizeMacIfPlain(clientMac);
+  if (!normalizedMac) return null;
+  const result = await pool.query(
+    `SELECT pas.id, pas.user_id, pas.ue_ip, pas.ue_mac, pas.ssid, pas.authorized_at, pas.last_seen_at,
+            u.nome, u.cpf_formatado, u.cpf_normalizado
+     FROM portal_active_sessions pas
+     JOIN users u ON u.id = pas.user_id
+     WHERE pas.ue_mac = $1 AND pas.ended_at IS NULL
+     ORDER BY pas.authorized_at DESC
+     LIMIT 1`,
+    [normalizedMac]
+  );
+  return result.rows[0] || null;
+}
+
 async function touchActiveSession(sessionId) {
   if (!sessionId) return;
   await pool.query(`UPDATE portal_active_sessions SET last_seen_at = NOW() WHERE id = $1`, [sessionId]);
+}
+
+async function findAuthorizedLoginSessionByWispr({ userIp = '', userMac = '' }) {
+  const normalizedIp = normalizeClientIp(userIp);
+  const normalizedMac = normalizeMacIfPlain(userMac);
+  if (!normalizedIp && !normalizedMac) return null;
+
+  const clauses = [];
+  const values = [];
+  if (normalizedMac) {
+    values.push(normalizedMac);
+    clauses.push(`ls.client_mac = $${values.length}`);
+  }
+  if (normalizedIp) {
+    values.push(normalizedIp);
+    clauses.push(`ls.uip = $${values.length}`);
+  }
+  if (clauses.length === 0) return null;
+
+  const query = await pool.query(
+    `SELECT ls.id, ls.user_id, ls.nbi_ip, ls.proxy, ls.uip, ls.client_mac, ls.ssid, ls.authorized_at, ls.login_password,
+            u.nome, u.cpf_formatado, u.cpf_normalizado, u.username_radius
+     FROM login_sessions ls
+     JOIN users u ON u.id = ls.user_id
+     WHERE ls.authorized_at IS NOT NULL
+       AND ls.consumed_at IS NULL
+       AND (${clauses.join(' OR ')})
+     ORDER BY ls.authorized_at DESC
+     LIMIT 1`,
+    values
+  );
+  return query.rows[0] || null;
+}
+
+async function resolvePortalStatusFromWispr(ctx = {}) {
+  const wispr = resolveWisprParams(ctx);
+  const normalizedIp = normalizeClientIp(wispr.userIp);
+  const normalizedMac = normalizeMacIfPlain(wispr.userMac);
+
+  if (!wispr.nbiIP || !normalizedIp || !normalizedMac) {
+    return { authorized: false, reason: 'missing_required_wispr' };
+  }
+
+  const dbSession = await findAuthorizedLoginSessionByWispr({ userIp: normalizedIp, userMac: normalizedMac });
+
+  if (dbSession) {
+    try {
+      const nbiResult = await statusAsync({
+        nbiIP: wispr.nbiIP,
+        ueIp: normalizedIp,
+        ueMac: normalizedMac,
+        proxy: wispr.proxy || dbSession.proxy || '0',
+        ueUsername: dbSession.username_radius,
+        uePassword: dbSession.login_password || undefined
+      });
+
+      const responseCode = String(nbiResult.detail?.ResponseCode || '');
+      if (nbiResult.success) {
+        return { authorized: true, source: 'nbi_status', responseCode, session: dbSession };
+      }
+
+      logInfo('portal_authorization_decision', {
+        decision: 'unauthorized',
+        source: 'nbi_status',
+        response_code: responseCode,
+        reply_message: String(nbiResult.detail?.ReplyMessage || ''),
+        ue_ip: normalizedIp,
+        ue_mac: maskMac(normalizedMac)
+      });
+    } catch (error) {
+      logError('portal_status_nbi_failed', {
+        ue_ip: normalizedIp,
+        ue_mac: maskMac(normalizedMac),
+        nbi_ip: wispr.nbiIP,
+        error
+      });
+    }
+  }
+
+  if (dbSession) {
+    return { authorized: true, source: 'db_fallback', responseCode: null, session: dbSession };
+  }
+
+  return { authorized: false, reason: 'not_authorized' };
+}
+
+function renderConnectedStatus(res, session, fallback = {}) {
+  return res.render('status', {
+    title: 'Status da conexão',
+    userName: session?.nome || 'Visitante',
+    cpfMasked: maskCpf(session?.cpf_formatado || session?.cpf_normalizado || ''),
+    authorizedAtLabel: formatDateTime(session?.authorized_at),
+    sessionDuration: formatDurationSince(session?.authorized_at),
+    ssid: session?.ssid || fallback.ssid || 'GuestTRT-Teste',
+    ueIp: session?.uip || session?.ue_ip || fallback.uip || '-',
+    macMasked: maskMac(session?.client_mac || session?.ue_mac || fallback.client_mac || ''),
+    ueIpRaw: session?.uip || session?.ue_ip || fallback.uip || '',
+    ueMacRaw: session?.client_mac || session?.ue_mac || fallback.client_mac || '',
+    nbiIP: fallback.nbiIP || session?.nbi_ip || '',
+    proxy: fallback.proxy || session?.proxy || '0'
+  });
 }
 
 async function createPortalSession(params) {
@@ -691,11 +808,31 @@ app.get('/portal', async (req, res) => {
   try {
     const wisprCtx = pickWisprParams(req.query);
     if (hasRequiredWispr(wisprCtx)) {
+      const status = await resolvePortalStatusFromWispr(wisprCtx);
+      if (status.authorized && status.session) {
+        logInfo('portal_authorization_decision', {
+          decision: 'authorized',
+          source: status.source,
+          response_code: status.responseCode || null,
+          ue_ip: wisprCtx.uip,
+          ue_mac: maskMac(wisprCtx.client_mac),
+          nbi_ip: wisprCtx.nbiIP
+        });
+        return renderConnectedStatus(res, status.session, wisprCtx);
+      }
+
       const lsid = await createPortalSession(req.query);
       res.cookie('portal_lsid', lsid, {
         maxAge: LOGIN_SESSION_TTL_SECONDS * 1000,
         httpOnly: true,
         sameSite: 'lax'
+      });
+      logInfo('portal_authorization_decision', {
+        decision: 'unauthorized',
+        source: status.source || status.reason || 'no_session',
+        ue_ip: wisprCtx.uip,
+        ue_mac: maskMac(wisprCtx.client_mac),
+        nbi_ip: wisprCtx.nbiIP
       });
       return res.render('portal', {
         title: 'Portal Visitantes TRT9',
@@ -716,15 +853,6 @@ app.get('/portal', async (req, res) => {
       portalSessionUserIdNumber > 0
     );
 
-    if (!hasValidUserIdCookie) {
-      logInfo('portal_ctx_missing_blocked', { request_ip: req.ip, params: sanitizeParams(wisprCtx) });
-      return renderInvalidAccess(res, {
-        title: 'Acesso inválido',
-        statusCode: 400,
-        message: 'Conecte-se ao Wi‑Fi de visitantes e abra qualquer site para ser redirecionado automaticamente ao portal.'
-      });
-    }
-
     let activeSession = null;
     if (hasValidUserIdCookie) {
       activeSession = await getActiveSessionByUserId(portalSessionUserIdNumber);
@@ -735,18 +863,10 @@ app.get('/portal', async (req, res) => {
 
     if (activeSession) {
       await touchActiveSession(activeSession.id);
-      return res.render('status', {
-        title: 'Status da conexão',
-        userName: activeSession.nome || 'Visitante',
-        cpfMasked: maskCpf(activeSession.cpf_formatado || activeSession.cpf_normalizado || ''),
-        authorizedAtLabel: formatDateTime(activeSession.authorized_at),
-        sessionDuration: formatDurationSince(activeSession.authorized_at),
-        ssid: activeSession.ssid || 'GuestTRT-Teste',
-        ueIp: activeSession.ue_ip || clientIp || '-',
-        macMasked: maskMac(activeSession.ue_mac || '')
-      });
+      return renderConnectedStatus(res, activeSession, { uip: clientIp });
     }
 
+    logInfo('portal_ctx_missing_blocked', { request_ip: req.ip, params: sanitizeParams(wisprCtx) });
     return renderInvalidAccess(res, {
       title: 'Acesso inválido',
       statusCode: 400,
@@ -1155,11 +1275,21 @@ app.post('/otp/verify', verifySmsHandler);
 app.post('/logout', async (req, res) => {
   const portalSessionUserId = String(req.cookies?.portal_session || '').trim();
   const clientIp = normalizeClientIp(req.ip);
+  const body = normalizeBodyFields(req.body);
+  const wisprCtx = pickWisprParams(body);
+  const postedUeIp = normalizeClientIp(body.ue_ip || wisprCtx.uip || '');
+  const postedUeMac = normalizeMacIfPlain(body.ue_mac || wisprCtx.client_mac || '');
 
   try {
     let activeSession = null;
     if (portalSessionUserId) {
       activeSession = await getActiveSessionByUserId(portalSessionUserId);
+    }
+    if (!activeSession && postedUeMac) {
+      activeSession = await getActiveSessionByMac(postedUeMac);
+    }
+    if (!activeSession && postedUeIp) {
+      activeSession = await getActiveSessionByIp(postedUeIp);
     }
     if (!activeSession && clientIp) {
       activeSession = await getActiveSessionByIp(clientIp);
@@ -1210,6 +1340,18 @@ app.post('/logout', async (req, res) => {
            AND authorized_at IS NOT NULL`,
         [activeSession.user_id]
       );
+      logInfo('logout_logical_completed', {
+        user_id: activeSession.user_id,
+        portal_active_session_id: activeSession.id,
+        ue_ip: activeSession.ue_ip,
+        ue_mac: maskMac(activeSession.ue_mac)
+      });
+    } else {
+      logInfo('logout_no_active_session', {
+        request_ip: clientIp,
+        posted_ue_ip: postedUeIp || null,
+        posted_ue_mac: postedUeMac ? maskMac(postedUeMac) : null
+      });
     }
   } catch (error) {
     logError('logout_failed', { user_id: portalSessionUserId || null, request_ip: clientIp || null, error });

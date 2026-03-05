@@ -335,4 +335,54 @@ async function disconnectAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername }) {
   return { success: false, mode: 'disconnect', detail: disconnectResponse, requestId };
 }
 
-module.exports = { loginAsync, disconnectAsync };
+async function statusAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword }) {
+  if (process.env.NBI_MOCK === 'true') {
+    return {
+      success: true,
+      mode: 'mock',
+      detail: { ResponseCode: '101', ReplyMessage: 'Client authorized (mock).' }
+    };
+  }
+
+  const requestId = crypto.randomUUID();
+  const statusPayload = {
+    ...basePayload(),
+    RequestType: 'Status',
+    'UE-IP': ueIp,
+    'UE-MAC': ueMac,
+    'UE-Proxy': proxy || '0',
+    ...(ueUsername ? { 'UE-Username': ueUsername } : {}),
+    ...(uePassword ? { 'UE-Password': uePassword } : {})
+  };
+
+  const statusResult = await postWithFallback({
+    nbiIP,
+    payload: statusPayload,
+    requestType: 'Status',
+    requestId,
+    ueIp,
+    ueMac,
+    ueUsername,
+    proxy
+  });
+
+  const statusResponse = statusResult.response;
+  logInfo('nbi_status_result', {
+    request_id: requestId,
+    nbi_ip: nbiIP,
+    endpoint: statusResult.endpoint,
+    response_code: responseCode(statusResponse),
+    reply_message: String(statusResponse?.ReplyMessage ?? ''),
+    session_id: statusResponse?.SessionId || null,
+    transaction_id: statusResponse?.TransactionId || null
+  });
+
+  return {
+    success: isSuccess(statusResponse),
+    mode: 'status',
+    detail: statusResponse,
+    requestId
+  };
+}
+
+module.exports = { loginAsync, disconnectAsync, statusAsync };
