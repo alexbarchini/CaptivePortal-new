@@ -20,6 +20,7 @@ const { loginAsync, disconnectAsync, statusAsync } = require('./services/ruckusN
 const { buildSmsProvider } = require('./services/smsProvider');
 const { enforceMaxOpenSessions, closeStaleAuthorizedOpenSessions } = require('./services/sessionCleanup');
 const { logInfo, logError, LOG_TZ, AUTH_LOG_FILE_PATH } = require('./utils/logger');
+const { detectDeviceType } = require('./utils/device');
 
 const app = express();
 const TRUST_PROXY = (process.env.TRUST_PROXY || 'true').toLowerCase() !== 'false';
@@ -90,6 +91,29 @@ function sanitizeParams(params = {}) {
   if (sanitized.cpf) sanitized.cpf = cleanDigits(sanitized.cpf);
   return sanitized;
 }
+
+function normalizeDeviceName(rawValue = '') {
+  const value = String(rawValue || '').trim();
+  return value ? value.slice(0, 255) : null;
+}
+
+function getDeviceNameFromRequest(req, context = {}) {
+  const candidates = [
+    req?.hostname,
+    req?.headers?.['x-client-name'],
+    req?.headers?.['x-device-name'],
+    context?.hostname,
+    context?.client_name
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeDeviceName(candidate);
+    if (normalized) return normalized;
+  }
+
+  return null;
+}
+
 function buildCtxFromSession(session = {}) {
   return {
     nbiIP: session.nbi_ip || '',
@@ -467,14 +491,16 @@ function renderConnectedStatus(res, session, fallback = {}) {
   });
 }
 
-async function createPortalSession(params) {
+async function createPortalSession(req, params) {
   const lsid = crypto.randomUUID();
   const ctx = pickWisprParams(params);
+  const deviceType = detectDeviceType(req.get('user-agent') || '');
+  const deviceName = getDeviceNameFromRequest(req, params);
   await pool.query(
     `INSERT INTO login_sessions (
-      id, ctx_json, nbi_ip, uip, client_mac, proxy, ssid, sip, dn, wlan_name, url, apip, vlan, expires_at
+      id, ctx_json, nbi_ip, uip, client_mac, proxy, ssid, sip, dn, wlan_name, url, apip, vlan, expires_at, device_type, device_name
     ) VALUES (
-      $1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + ($14 || ' seconds')::interval
+      $1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + ($14 || ' seconds')::interval, $15, $16
     )`,
     [
       lsid,
@@ -490,7 +516,9 @@ async function createPortalSession(params) {
       ctx.url,
       ctx.apip,
       ctx.vlan,
-      LOGIN_SESSION_TTL_SECONDS
+      LOGIN_SESSION_TTL_SECONDS,
+      deviceType,
+      deviceName
     ]
   );
   logCtxPresence('portal_ctx_captured', lsid, ctx);
@@ -750,6 +778,8 @@ app.get('/admin/sessions', async (req, res) => {
             ls.ssid,
             ls.vlan,
             ls.apip,
+            ls.device_type,
+            ls.device_name,
             u.nome,
             u.cpf_formatado,
             u.cpf_normalizado,
@@ -821,7 +851,7 @@ app.get('/portal', async (req, res) => {
         return renderConnectedStatus(res, status.session, wisprCtx);
       }
 
-      const lsid = await createPortalSession(req.query);
+      const lsid = await createPortalSession(req, req.query);
       res.cookie('portal_lsid', lsid, {
         maxAge: LOGIN_SESSION_TTL_SECONDS * 1000,
         httpOnly: true,
@@ -1201,6 +1231,8 @@ async function verifySmsHandler(req, res) {
 
     const ctx = sessionCtx;
     const { userIp, userMac } = resolveWisprParams(ctx);
+    const deviceType = detectDeviceType(req.get('user-agent') || '');
+    const deviceName = getDeviceNameFromRequest(req, ctx);
 
     logInfo('otp_verify_success', { lsid: session.id, user_id: session.user_id, ue_ip: userIp, ue_mac: maskMac(userMac) });
     logInfo('authorize_flow_started', { lsid: session.id, user_id: session.user_id });
@@ -1227,7 +1259,14 @@ async function verifySmsHandler(req, res) {
     }
 
     await enforceMaxOpenSessions(session.user_id, session.id, 5);
-    await pool.query(`UPDATE login_sessions SET authorized_at = NOW() WHERE id = $1`, [session.id]);
+    await pool.query(
+      `UPDATE login_sessions
+       SET authorized_at = NOW(),
+           device_type = $2,
+           device_name = $3
+       WHERE id = $1`,
+      [session.id, deviceType, deviceName]
+    );
     await pool.query(
       `INSERT INTO portal_active_sessions (id, user_id, ue_ip, ue_mac, ssid, authorized_at, ended_at, last_seen_at, created_at)
        VALUES ($1, $2, $3, $4, $5, NOW(), NULL, NOW(), NOW())
