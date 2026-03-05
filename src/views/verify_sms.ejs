@@ -29,32 +29,122 @@
         <button type="submit">Confirmar</button>
       </form>
 
-      <form method="post" action="/verify/sms/resend">
+      <form method="post" action="/verify/sms/resend" id="resend-form">
         <input type="hidden" name="lsid" value="<%= lsid %>" />
-        <button type="submit" id="resend-btn" <%= resendWaitSeconds > 0 ? 'disabled' : '' %>>Reenviar código</button>
+        <button type="submit" id="resend-btn" <%= resendWaitSeconds > 0 ? 'disabled' : '' %>>Reenviar SMS</button>
       </form>
-      <p class="subtle" id="cooldown"><%= resendWaitSeconds > 0 ? ('Reenvio disponível em ' + resendWaitSeconds + 's.') : '' %></p>
+      <p class="subtle" id="cooldown"></p>
+      <div class="alert error" id="resend-error" hidden></div>
     </section>
   </main>
 
   <script>
+    const storageKey = 'smsCooldownEndsAt';
+    const resendForm = document.getElementById('resend-form');
     const cooldownEl = document.getElementById('cooldown');
+    const resendErrorEl = document.getElementById('resend-error');
     const resendBtn = document.getElementById('resend-btn');
-    let seconds = Number(<%= Number(resendWaitSeconds || 0) %>);
+    const initialWaitSeconds = Number(<%= Number(resendWaitSeconds || 0) %>);
+    let cooldownTimerId = null;
+    let isSending = false;
 
-    function tick() {
-      if (seconds <= 0) {
-        resendBtn.disabled = false;
-        cooldownEl.textContent = '';
-        return;
-      }
-      resendBtn.disabled = true;
-      cooldownEl.textContent = `Reenvio disponível em ${seconds}s.`;
-      seconds -= 1;
-      setTimeout(tick, 1000);
+    function getCooldownRemainingSeconds() {
+      const endsAt = Number(localStorage.getItem(storageKey) || 0);
+      if (!endsAt || Number.isNaN(endsAt)) return 0;
+      const remainingMs = endsAt - Date.now();
+      return Math.max(0, Math.ceil(remainingMs / 1000));
     }
 
-    tick();
+    function setCooldown(seconds) {
+      const sanitized = Math.max(0, Number(seconds || 0));
+      if (sanitized <= 0) {
+        localStorage.removeItem(storageKey);
+        return;
+      }
+      localStorage.setItem(storageKey, String(Date.now() + (sanitized * 1000)));
+    }
+
+    function clearResendError() {
+      resendErrorEl.hidden = true;
+      resendErrorEl.textContent = '';
+    }
+
+    function showResendError(message) {
+      resendErrorEl.hidden = false;
+      resendErrorEl.textContent = message;
+    }
+
+    function updateResendUi() {
+      if (isSending) {
+        resendBtn.disabled = true;
+        resendBtn.textContent = 'Enviando...';
+        cooldownEl.textContent = 'Enviando novo SMS...';
+        return;
+      }
+
+      const seconds = getCooldownRemainingSeconds();
+      if (seconds > 0) {
+        resendBtn.disabled = true;
+        resendBtn.textContent = `Reenviar SMS (${seconds}s)`;
+        cooldownEl.textContent = `Aguarde ${seconds}s para reenviar.`;
+      } else {
+        resendBtn.disabled = false;
+        resendBtn.textContent = 'Reenviar SMS';
+        cooldownEl.textContent = '';
+      }
+    }
+
+    function startUiTicker() {
+      if (cooldownTimerId) clearInterval(cooldownTimerId);
+      updateResendUi();
+      cooldownTimerId = setInterval(updateResendUi, 1000);
+    }
+
+    if (initialWaitSeconds > getCooldownRemainingSeconds()) {
+      setCooldown(initialWaitSeconds);
+    }
+
+    startUiTicker();
+
+    resendForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      clearResendError();
+      if (isSending || getCooldownRemainingSeconds() > 0) return;
+
+      isSending = true;
+      updateResendUi();
+
+      try {
+        const response = await fetch('/verify/sms/resend', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'application/json'
+          },
+          body: new URLSearchParams(new FormData(resendForm)).toString()
+        });
+
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data.success) {
+          setCooldown(Number(data.retry_after_seconds || 60));
+          return;
+        }
+
+        const retryAfterSeconds = Number(data.retry_after_seconds || 0);
+        if (retryAfterSeconds > 0) {
+          setCooldown(retryAfterSeconds);
+        } else {
+          setCooldown(Number(data.temporary_retry_after_seconds || 4));
+        }
+        showResendError(data.error || 'Não foi possível reenviar o SMS. Tente novamente em instantes.');
+      } catch (_) {
+        setCooldown(4);
+        showResendError('Falha de conexão ao reenviar SMS. Tente novamente em instantes.');
+      } finally {
+        isSending = false;
+        updateResendUi();
+      }
+    });
   </script>
 </body>
 </html>

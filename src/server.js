@@ -720,6 +720,12 @@ class AuthFlowError extends Error {
 app.get('/healthz', (_, res) => res.json({ status: 'ok' }));
 
 
+
+function requestPrefersJson(req) {
+  const acceptHeader = String(req.get('accept') || '').toLowerCase();
+  return acceptHeader.includes('application/json');
+}
+
 app.get('/admin/login', (req, res) => {
   res.render('admin_login', { title: 'Administração', error: null });
 });
@@ -1178,49 +1184,86 @@ app.post('/login', async (req, res) => {
 
 app.post('/verify/sms/resend', async (req, res) => {
   const lsid = String(req.body.lsid || '');
-  const sessionQuery = await pool.query(
-    `SELECT ls.id, ls.user_id, ls.ctx_json, ls.expires_at, ls.consumed_at, ls.authorized_at, ls.nbi_ip, ls.uip, ls.client_mac, ls.proxy, ls.ssid, ls.sip, ls.dn, ls.wlan_name, ls.url, ls.apip, ls.vlan, u.phone_e164
-     FROM login_sessions ls
-     JOIN users u ON u.id = ls.user_id
-     WHERE ls.id = $1`,
-    [lsid]
-  );
-  if (sessionQuery.rowCount === 0) return genericInvalidCredentials(res, lsid);
+  const expectsJson = requestPrefersJson(req);
 
-  const session = sessionQuery.rows[0];
-  if (session.authorized_at || session.consumed_at || new Date(session.expires_at) < new Date()) return genericInvalidCredentials(res, lsid);
+  try {
+    const sessionQuery = await pool.query(
+      `SELECT ls.id, ls.user_id, ls.ctx_json, ls.expires_at, ls.consumed_at, ls.authorized_at, ls.nbi_ip, ls.uip, ls.client_mac, ls.proxy, ls.ssid, ls.sip, ls.dn, ls.wlan_name, ls.url, ls.apip, ls.vlan, u.phone_e164
+       FROM login_sessions ls
+       JOIN users u ON u.id = ls.user_id
+       WHERE ls.id = $1`,
+      [lsid]
+    );
+    if (sessionQuery.rowCount === 0) {
+      if (expectsJson) return res.status(401).json({ success: false, error: 'Sessão inválida.' });
+      return genericInvalidCredentials(res, lsid);
+    }
 
-  logCtxPresence('otp_resend_ctx_lookup', lsid, buildCtxFromSession(session));
-  const cooldown = await ensureResendCooldown(session.user_id, lsid);
-  if (!cooldown.allowed) {
-    return res.status(429).render('verify_sms', {
+    const session = sessionQuery.rows[0];
+    if (session.authorized_at || session.consumed_at || new Date(session.expires_at) < new Date()) {
+      if (expectsJson) return res.status(401).json({ success: false, error: 'Sessão inválida ou expirada.' });
+      return genericInvalidCredentials(res, lsid);
+    }
+
+    logCtxPresence('otp_resend_ctx_lookup', lsid, buildCtxFromSession(session));
+    const cooldown = await ensureResendCooldown(session.user_id, lsid);
+    if (!cooldown.allowed) {
+      if (expectsJson) {
+        return res.status(429).json({ success: false, error: `Aguarde ${cooldown.waitSeconds}s para reenviar o código.`, retry_after_seconds: cooldown.waitSeconds });
+      }
+      return res.status(429).render('verify_sms', {
+        title: 'Verificar SMS',
+        error: `Aguarde ${cooldown.waitSeconds}s para reenviar o código.`,
+        message: null,
+        lsid,
+        maskedPhone: session.phone_e164.replace(/(\+55\d{2})\d{5}(\d{4})/, '$1*****$2'),
+        resendWaitSeconds: cooldown.waitSeconds,
+        contextBadge: buildContextBadge(buildCtxFromSession(session))
+      });
+    }
+
+    const wispr = resolveWisprParams(buildCtxFromSession(session));
+    const hasRecentValidOtp = await hasRecentValidOtpForContext({ userId: session.user_id, ueIp: wispr.userIp, ueMac: wispr.userMac });
+    if (hasRecentValidOtp) {
+      logInfo('otp_resend_skipped_recent_valid', { user_id: session.user_id, ue_ip: wispr.userIp, ue_mac: maskMac(wispr.userMac), window_seconds: OTP_VALID_REUSE_WINDOW_SECONDS });
+      if (expectsJson) {
+        return res.status(429).json({
+          success: false,
+          error: 'Já existe OTP validado recentemente para este dispositivo. Aguarde 2 minutos para solicitar novo código.',
+          retry_after_seconds: OTP_VALID_REUSE_WINDOW_SECONDS
+        });
+      }
+      return res.status(409).render('verify_sms', {
+        title: 'Verificar SMS',
+        error: 'Já existe OTP validado recentemente para este dispositivo. Aguarde 2 minutos para solicitar novo código.',
+        message: null,
+        lsid,
+        maskedPhone: session.phone_e164.replace(/(\+55\d{2})\d{5}(\d{4})/, '$1*****$2'),
+        resendWaitSeconds: OTP_VALID_REUSE_WINDOW_SECONDS,
+        contextBadge: buildContextBadge(buildCtxFromSession(session))
+      });
+    }
+
+    await sendOtpForUser({ userId: session.user_id, phoneE164: session.phone_e164, reason: 'resend', ueIp: wispr.userIp, ueMac: wispr.userMac, lsid });
+    if (expectsJson) {
+      return res.status(200).json({ success: true, message: 'SMS reenviado com sucesso.', retry_after_seconds: OTP_RESEND_COOLDOWN_SECONDS });
+    }
+    return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
+  } catch (error) {
+    logError('otp_resend_failed', { lsid, error });
+    if (expectsJson) {
+      return res.status(500).json({ success: false, error: 'Falha ao reenviar SMS. Tente novamente em instantes.', temporary_retry_after_seconds: 4 });
+    }
+    return res.status(500).render('verify_sms', {
       title: 'Verificar SMS',
-      error: `Aguarde ${cooldown.waitSeconds}s para reenviar o código.`,
+      error: 'Falha ao reenviar SMS. Tente novamente em instantes.',
       message: null,
       lsid,
-      maskedPhone: session.phone_e164.replace(/(\+55\d{2})\d{5}(\d{4})/, '$1*****$2'),
-      resendWaitSeconds: cooldown.waitSeconds,
-      contextBadge: buildContextBadge(buildCtxFromSession(session))
+      maskedPhone: '',
+      resendWaitSeconds: 4,
+      contextBadge: null
     });
   }
-
-  const wispr = resolveWisprParams(buildCtxFromSession(session));
-  const hasRecentValidOtp = await hasRecentValidOtpForContext({ userId: session.user_id, ueIp: wispr.userIp, ueMac: wispr.userMac });
-  if (hasRecentValidOtp) {
-    logInfo('otp_resend_skipped_recent_valid', { user_id: session.user_id, ue_ip: wispr.userIp, ue_mac: maskMac(wispr.userMac), window_seconds: OTP_VALID_REUSE_WINDOW_SECONDS });
-    return res.status(409).render('verify_sms', {
-      title: 'Verificar SMS',
-      error: 'Já existe OTP validado recentemente para este dispositivo. Aguarde 2 minutos para solicitar novo código.',
-      message: null,
-      lsid,
-      maskedPhone: session.phone_e164.replace(/(\+55\d{2})\d{5}(\d{4})/, '$1*****$2'),
-      resendWaitSeconds: OTP_VALID_REUSE_WINDOW_SECONDS,
-      contextBadge: buildContextBadge(buildCtxFromSession(session))
-    });
-  }
-
-  await sendOtpForUser({ userId: session.user_id, phoneE164: session.phone_e164, reason: 'resend', ueIp: wispr.userIp, ueMac: wispr.userMac, lsid });
-  return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
 });
 
 async function verifySmsHandler(req, res) {
