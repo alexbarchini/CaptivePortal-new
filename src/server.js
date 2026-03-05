@@ -524,32 +524,59 @@ async function createPortalSession(req, params) {
   const ctx = pickWisprParams(params);
   const deviceType = detectDeviceType(req.get('user-agent') || '');
   const deviceName = getDeviceNameFromRequest(req, params);
-  await pool.query(
-    `INSERT INTO login_sessions (
-      id, ctx_json, nbi_ip, uip, client_mac, proxy, ssid, sip, dn, wlan_name, url, apip, vlan, expires_at, device_type, device_name, user_agent
-    ) VALUES (
-      $1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + ($14 || ' seconds')::interval, $15, $16, $17
-    )`,
-    [
-      lsid,
-      JSON.stringify(ctx),
-      ctx.nbiIP,
-      ctx.uip,
-      normalizeMacIfPlain(ctx.client_mac),
-      ctx.proxy,
-      ctx.ssid,
-      ctx.sip,
-      ctx.dn,
-      ctx.wlanName,
-      ctx.url,
-      ctx.apip,
-      ctx.vlan,
-      LOGIN_SESSION_TTL_SECONDS,
-      deviceType,
-      deviceName,
-      req.get('user-agent') || ''
-    ]
-  );
+  const normalizedClientMac = normalizeMacIfPlain(ctx.client_mac);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    if (normalizedClientMac) {
+      await client.query(
+        `UPDATE login_sessions
+         SET status = 'CLOSED',
+             closed_at = COALESCE(closed_at, NOW()),
+             consumed_at = COALESCE(consumed_at, NOW())
+         WHERE client_mac = $1
+           AND status = 'OPEN'`,
+        [normalizedClientMac]
+      );
+    }
+
+    await client.query(
+      `INSERT INTO login_sessions (
+        id, ctx_json, nbi_ip, uip, client_mac, proxy, ssid, sip, dn, wlan_name, url, apip, vlan, expires_at, device_type, device_name, user_agent, status
+      ) VALUES (
+        $1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + ($14 || ' seconds')::interval, $15, $16, $17, 'OPEN'
+      )`,
+      [
+        lsid,
+        JSON.stringify(ctx),
+        ctx.nbiIP,
+        ctx.uip,
+        normalizedClientMac,
+        ctx.proxy,
+        ctx.ssid,
+        ctx.sip,
+        ctx.dn,
+        ctx.wlanName,
+        ctx.url,
+        ctx.apip,
+        ctx.vlan,
+        LOGIN_SESSION_TTL_SECONDS,
+        deviceType,
+        deviceName,
+        req.get('user-agent') || ''
+      ]
+    );
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
   logCtxPresence('portal_ctx_captured', lsid, ctx);
   return lsid;
 }
@@ -1408,7 +1435,9 @@ app.post('/logout', async (req, res) => {
       );
       await pool.query(
         `UPDATE login_sessions
-         SET consumed_at = COALESCE(consumed_at, NOW())
+         SET consumed_at = COALESCE(consumed_at, NOW()),
+             status = 'CLOSED',
+             closed_at = COALESCE(closed_at, NOW())
          WHERE user_id = $1
            AND authorized_at IS NOT NULL`,
         [activeSession.user_id]

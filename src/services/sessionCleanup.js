@@ -36,7 +36,9 @@ async function enforceMaxOpenSessions(userId, keepLsid, maxOpen = 5) {
     const idsToClose = openSessionIds.slice(0, overflow);
     const closeResult = await client.query(
       `UPDATE login_sessions
-       SET consumed_at = NOW()
+       SET consumed_at = NOW(),
+           status = 'CLOSED',
+           closed_at = COALESCE(closed_at, NOW())
        WHERE id = ANY($1::uuid[])
          AND ($2 = '' OR id::text <> $2)
        RETURNING id`,
@@ -68,7 +70,9 @@ async function closeStaleAuthorizedOpenSessions(maxAgeHours = 24) {
   try {
     const result = await pool.query(
       `UPDATE login_sessions
-       SET consumed_at = NOW()
+       SET consumed_at = NOW(),
+           status = 'CLOSED',
+           closed_at = COALESCE(closed_at, NOW())
        WHERE consumed_at IS NULL
          AND authorized_at IS NOT NULL
          AND authorized_at < NOW() - ($1::int * INTERVAL '1 hour')`,
