@@ -18,6 +18,7 @@ const {
 } = require('./utils/validators');
 const { loginAsync, disconnectAsync } = require('./services/ruckusNbi');
 const { buildSmsProvider } = require('./services/smsProvider');
+const { enforceMaxOpenSessions, closeStaleAuthorizedOpenSessions } = require('./services/sessionCleanup');
 const { logInfo, logError, LOG_TZ, AUTH_LOG_FILE_PATH } = require('./utils/logger');
 
 const app = express();
@@ -1105,6 +1106,7 @@ async function verifySmsHandler(req, res) {
       throw new AuthFlowError('NBI falhou.', `Falha na autorização do acesso no SmartZone. request_id=${nbiResult.requestId || 'n/a'}`, 401, 'nbi_failed');
     }
 
+    await enforceMaxOpenSessions(session.user_id, session.id, 5);
     await pool.query(`UPDATE login_sessions SET consumed_at = NOW(), authorized_at = NOW() WHERE id = $1`, [session.id]);
     await pool.query(
       `INSERT INTO portal_active_sessions (id, user_id, ue_ip, ue_mac, ssid, authorized_at, ended_at, last_seen_at, created_at)
@@ -1228,6 +1230,12 @@ app.get('/success', (req, res) => {
 
 async function bootstrap() {
   await runMigrations(pool);
+
+  await closeStaleAuthorizedOpenSessions(24);
+  setInterval(() => {
+    closeStaleAuthorizedOpenSessions(24);
+  }, 30 * 60 * 1000);
+
   app.listen(PORT, () => {
     console.log(`Portal online na porta ${PORT}`);
     console.log(`Log estruturado em stdout com timezone ${LOG_TZ}`);
