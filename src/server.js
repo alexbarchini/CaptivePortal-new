@@ -808,7 +808,6 @@ app.get('/admin/sessions', async (req, res) => {
             ls.authorized_at,
             ls.status,
             ls.closed_at,
-            ls.updated_at,
             ls.otp_verified_at,
             ls.consumed_at,
             ls.uip,
@@ -825,7 +824,7 @@ app.get('/admin/sessions', async (req, res) => {
             CASE
               WHEN ls.authorized_at IS NULL THEN NULL
               WHEN ls.status = 'OPEN' THEN EXTRACT(EPOCH FROM (NOW() - ls.authorized_at))::int
-              WHEN ls.status = 'CLOSED' THEN EXTRACT(EPOCH FROM (COALESCE(ls.closed_at, ls.updated_at) - ls.authorized_at))::int
+              WHEN ls.status = 'CLOSED' AND ls.closed_at IS NOT NULL THEN EXTRACT(EPOCH FROM (ls.closed_at - ls.authorized_at))::int
               ELSE NULL
             END AS duration_seconds
      FROM login_sessions ls
