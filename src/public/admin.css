@@ -179,8 +179,7 @@
 .col-lsid { width: 210px; }
 .col-cpf { width: 130px; }
 .col-name { width: 220px; }
-.col-created,
-.col-authorized { width: 165px; }
+.col-created { width: 165px; }
 .col-duration { width: 84px; }
 .col-status { width: 98px; }
 .col-ip,

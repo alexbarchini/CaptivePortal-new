@@ -80,14 +80,12 @@
                   <th class="col-cpf">CPF</th>
                   <th class="col-name">Nome</th>
                   <th class="col-created">Criada em</th>
-                  <th class="col-authorized">Autorizada em</th>
                   <th class="col-duration">Duração</th>
                   <th class="col-status">Status</th>
-                  <th class="col-ip">IP</th>
+                  <th class="col-ip">IP cliente</th>
                   <th class="col-mac">MAC</th>
                   <th class="col-vlan">VLAN</th>
                   <th class="col-apip">AP IP</th>
-                  <th>Tipo</th>
                   <th>Dispositivo</th>
                 </tr>
               </thead>
@@ -98,14 +96,12 @@
                     <td><%= session.cpf_formatado || session.cpf_normalizado || '-' %></td>
                     <td class="truncate" title="<%= session.nome || '-' %>"><%= session.nome || '-' %></td>
                     <td><span title="<%= session.created_at_label %>"><%= session.created_at_label %></span></td>
-                    <td><span title="<%= session.authorized_at_label %>"><%= session.authorized_at_label %></span></td>
                     <td><%= session.duration_hms || '-' %></td>
                     <td><span class="status-pill status-<%= String(session.status || '').toLowerCase() %>"><%= session.status %></span></td>
                     <td class="truncate" title="<%= session.uip || '-' %>"><%= session.uip || '-' %></td>
                     <td class="truncate" title="<%= session.client_mac || '-' %>"><%= session.client_mac || '-' %></td>
                     <td><%= session.vlan || '-' %></td>
                     <td class="truncate" title="<%= session.apip || '-' %>"><%= session.apip || '-' %></td>
-                    <td><%= session.device_type || '-' %></td>
                     <td class="truncate" title="<%= session.device_display_name %>"><%= session.device_display_name %></td>
                   </tr>
                 <% }) %>
