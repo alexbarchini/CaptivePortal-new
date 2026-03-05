@@ -8,6 +8,22 @@
   <link rel="stylesheet" href="/public/admin.css" />
 </head>
 <body>
+  <%
+    const utcDateFormatter = new Intl.DateTimeFormat('pt-BR', {
+      timeZone: 'UTC',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    });
+    const formatUtcDateTime = (value) => {
+      if (!value) return '-';
+      return `${utcDateFormatter.format(new Date(value))} UTC`;
+    };
+  %>
   <%- include('partials/admin_header', { showLogout: true, pageTitle: 'Administração · Sessões' }) %>
   <main class="admin-shell">
     <section class="card admin-card">
@@ -97,9 +113,9 @@
                     <td class="truncate" title="<%= session.lsid %>"><%= session.lsid %></td>
                     <td><%= session.cpf_formatado || session.cpf_normalizado || '-' %></td>
                     <td class="truncate" title="<%= session.nome || '-' %>"><%= session.nome || '-' %></td>
-                    <td><span title="<%= session.created_at ? new Date(session.created_at).toLocaleString('pt-BR') : '-' %>"><%= session.created_at ? new Date(session.created_at).toLocaleString('pt-BR') : '-' %></span></td>
-                    <td><span title="<%= session.authorized_at ? new Date(session.authorized_at).toLocaleString('pt-BR') : '-' %>"><%= session.authorized_at ? new Date(session.authorized_at).toLocaleString('pt-BR') : '-' %></span></td>
-                    <td><span title="<%= session.consumed_at ? new Date(session.consumed_at).toLocaleString('pt-BR') : '-' %>"><%= session.consumed_at ? new Date(session.consumed_at).toLocaleString('pt-BR') : '-' %></span></td>
+                    <td><span title="<%= formatUtcDateTime(session.created_at) %>"><%= formatUtcDateTime(session.created_at) %></span></td>
+                    <td><span title="<%= formatUtcDateTime(session.authorized_at) %>"><%= formatUtcDateTime(session.authorized_at) %></span></td>
+                    <td><span title="<%= formatUtcDateTime(session.consumed_at) %>"><%= formatUtcDateTime(session.consumed_at) %></span></td>
                     <td><%= session.duration_hms || '-' %></td>
                     <td><span class="status-pill status-<%= String(session.status || '').toLowerCase() %>"><%= session.status %></span></td>
                     <td class="truncate" title="<%= session.uip || '-' %>"><%= session.uip || '-' %></td>

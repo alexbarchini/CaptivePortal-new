@@ -38,8 +38,9 @@ async function enforceMaxOpenSessions(userId, keepLsid, maxOpen = 5) {
       `UPDATE login_sessions
        SET consumed_at = NOW()
        WHERE id = ANY($1::uuid[])
+         AND ($2 = '' OR id::text <> $2)
        RETURNING id`,
-      [idsToClose]
+      [idsToClose, keepId]
     );
 
     await client.query('COMMIT');
