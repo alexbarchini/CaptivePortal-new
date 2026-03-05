@@ -226,6 +226,10 @@ function parseDatetimeLocal(value = '') {
   return parsed.toISOString();
 }
 
+function normalizeMacForFilter(mac = '') {
+  return String(mac || '').replace(/[^a-fA-F0-9]/g, '').toUpperCase();
+}
+
 function normalizeClientIp(ip = '') {
   if (!ip) return '';
   const value = String(ip).trim();
@@ -537,6 +541,9 @@ app.get('/admin', (req, res) => {
 app.get('/admin/sessions', async (req, res) => {
   const cpfNormalized = cleanDigits(String(req.query.cpf || ''));
   const nameQuery = String(req.query.name || '').trim();
+  const ipQuery = normalizeClientIp(String(req.query.ip || ''));
+  const macRaw = String(req.query.mac || '').trim();
+  const macNormalized = normalizeMacForFilter(macRaw);
   const fromRaw = String(req.query.from || '').trim();
   const toRaw = String(req.query.to || '').trim();
   const offsetRaw = Number.parseInt(String(req.query.offset || '0'), 10);
@@ -548,8 +555,19 @@ app.get('/admin/sessions', async (req, res) => {
     return res.status(400).render('admin_sessions', {
       title: 'Sessões administrativas',
       adminUser: req.adminSession.user,
-      filters: { cpf: cpfNormalized, name: nameQuery, from: fromRaw, to: toRaw },
+      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw },
       error: 'CPF inválido para consulta.',
+      sessions: [],
+      pagination: { limit: 50, offset, hasNextPage: false, nextOffset: offset + 50 }
+    });
+  }
+
+  if (macRaw && macNormalized.length !== 12) {
+    return res.status(400).render('admin_sessions', {
+      title: 'Sessões administrativas',
+      adminUser: req.adminSession.user,
+      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw },
+      error: 'MAC inválido para consulta.',
       sessions: [],
       pagination: { limit: 50, offset, hasNextPage: false, nextOffset: offset + 50 }
     });
@@ -559,7 +577,7 @@ app.get('/admin/sessions', async (req, res) => {
     return res.status(400).render('admin_sessions', {
       title: 'Sessões administrativas',
       adminUser: req.adminSession.user,
-      filters: { cpf: cpfNormalized, name: nameQuery, from: fromRaw, to: toRaw },
+      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw },
       error: 'Intervalo de data/hora inválido.',
       sessions: [],
       pagination: { limit: 50, offset, hasNextPage: false, nextOffset: offset + 50 }
@@ -575,6 +593,8 @@ app.get('/admin/sessions', async (req, res) => {
 
   if (cpfNormalized) pushFilter('u.cpf_normalizado = ?', cpfNormalized);
   if (nameQuery) pushFilter('u.nome ILIKE ?', `%${nameQuery}%`);
+  if (ipQuery) pushFilter('ls.uip = ?', ipQuery);
+  if (macNormalized) pushFilter("UPPER(regexp_replace(COALESCE(ls.client_mac, ''), '[^A-Fa-f0-9]', '', 'g')) = ?", macNormalized);
   if (fromIso) pushFilter('ls.created_at >= ?', fromIso);
   if (toIso) pushFilter('ls.created_at <= ?', toIso);
 
@@ -613,6 +633,8 @@ app.get('/admin/sessions', async (req, res) => {
   logInfo('admin_lookup', {
     cpf_normalizado: cpfNormalized || null,
     name_filter: nameQuery || null,
+    ip_filter: ipQuery || null,
+    mac_filter: macNormalized || null,
     from_filter: fromIso,
     to_filter: toIso,
     offset,
@@ -624,7 +646,7 @@ app.get('/admin/sessions', async (req, res) => {
   return res.render('admin_sessions', {
     title: 'Sessões administrativas',
     adminUser: req.adminSession.user,
-    filters: { cpf: cpfNormalized, name: nameQuery, from: fromRaw, to: toRaw },
+    filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw },
     error: null,
     sessions,
     pagination: { limit: 50, offset, hasNextPage, nextOffset: offset + 50 }
