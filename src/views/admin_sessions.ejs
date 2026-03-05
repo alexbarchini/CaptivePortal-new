@@ -80,6 +80,7 @@
                   <th class="col-cpf">CPF</th>
                   <th class="col-name">Nome</th>
                   <th class="col-created">Criada em</th>
+                  <th class="col-authorized">Autorizada em</th>
                   <th class="col-duration">Duração</th>
                   <th class="col-status">Status</th>
                   <th class="col-ip">IP cliente</th>
@@ -96,6 +97,7 @@
                     <td><%= session.cpf_formatado || session.cpf_normalizado || '-' %></td>
                     <td class="truncate" title="<%= session.nome || '-' %>"><%= session.nome || '-' %></td>
                     <td><span title="<%= session.created_at_label %>"><%= session.created_at_label %></span></td>
+                    <td><span title="<%= session.authorized_at_label %>"><%= session.authorized_at_label %></span></td>
                     <td><%= session.duration_hms || '-' %></td>
                     <td><span class="status-pill status-<%= String(session.status || '').toLowerCase() %>"><%= session.status %></span></td>
                     <td class="truncate" title="<%= session.uip || '-' %>"><%= session.uip || '-' %></td>
