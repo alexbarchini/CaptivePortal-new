@@ -382,21 +382,6 @@ async function getActiveSessionByUserId(userId) {
   return result.rows[0] || null;
 }
 
-async function getActiveSessionByIp(clientIp) {
-  if (!clientIp) return null;
-  const result = await pool.query(
-    `SELECT pas.id, pas.user_id, pas.ue_ip, pas.ue_mac, pas.ssid, pas.authorized_at, pas.last_seen_at,
-            u.nome, u.cpf_formatado, u.cpf_normalizado
-     FROM portal_active_sessions pas
-     JOIN users u ON u.id = pas.user_id
-     WHERE pas.ue_ip = $1 AND pas.ended_at IS NULL
-     ORDER BY pas.authorized_at DESC
-     LIMIT 1`,
-    [clientIp]
-  );
-  return result.rows[0] || null;
-}
-
 async function getActiveSessionByMac(clientMac) {
   const normalizedMac = normalizeMacIfPlain(clientMac);
   if (!normalizedMac) return null;
@@ -419,21 +404,8 @@ async function touchActiveSession(sessionId) {
 }
 
 async function findAuthorizedLoginSessionByWispr({ userIp = '', userMac = '' }) {
-  const normalizedIp = normalizeClientIp(userIp);
   const normalizedMac = normalizeMacIfPlain(userMac);
-  if (!normalizedIp && !normalizedMac) return null;
-
-  const clauses = [];
-  const values = [];
-  if (normalizedMac) {
-    values.push(normalizedMac);
-    clauses.push(`ls.client_mac = $${values.length}`);
-  }
-  if (normalizedIp) {
-    values.push(normalizedIp);
-    clauses.push(`ls.uip = $${values.length}`);
-  }
-  if (clauses.length === 0) return null;
+  if (!normalizedMac) return null;
 
   const query = await pool.query(
     `SELECT ls.id, ls.user_id, ls.nbi_ip, ls.proxy, ls.uip, ls.client_mac, ls.ssid, ls.authorized_at, ls.login_password,
@@ -441,11 +413,11 @@ async function findAuthorizedLoginSessionByWispr({ userIp = '', userMac = '' }) 
      FROM login_sessions ls
      JOIN users u ON u.id = ls.user_id
      WHERE ls.authorized_at IS NOT NULL
-       AND ls.consumed_at IS NULL
-       AND (${clauses.join(' OR ')})
+       AND ls.status = 'OPEN'
+       AND ls.client_mac = $1
      ORDER BY ls.authorized_at DESC
      LIMIT 1`,
-    values
+    [normalizedMac]
   );
   return query.rows[0] || null;
 }
@@ -941,6 +913,7 @@ app.get('/portal', async (req, res) => {
 
     const portalSessionUserId = String(req.cookies?.portal_session || '').trim();
     const clientIp = normalizeClientIp(req.ip);
+    const clientMac = normalizeMacIfPlain(wisprCtx.client_mac || '');
 
     const portalSessionUserIdNumber = Number(portalSessionUserId);
     const hasValidUserIdCookie = Boolean(
@@ -953,8 +926,8 @@ app.get('/portal', async (req, res) => {
     if (hasValidUserIdCookie) {
       activeSession = await getActiveSessionByUserId(portalSessionUserIdNumber);
     }
-    if (!activeSession && clientIp) {
-      activeSession = await getActiveSessionByIp(clientIp);
+    if (!activeSession && clientMac) {
+      activeSession = await getActiveSessionByMac(clientMac);
     }
 
     if (activeSession) {
@@ -1431,13 +1404,6 @@ app.post('/logout', async (req, res) => {
     if (!activeSession && postedUeMac) {
       activeSession = await getActiveSessionByMac(postedUeMac);
     }
-    if (!activeSession && postedUeIp) {
-      activeSession = await getActiveSessionByIp(postedUeIp);
-    }
-    if (!activeSession && clientIp) {
-      activeSession = await getActiveSessionByIp(clientIp);
-    }
-
     if (activeSession) {
       const sessionQuery = await pool.query(
         `SELECT ls.nbi_ip, ls.proxy, u.username_radius, u.cpf_normalizado
