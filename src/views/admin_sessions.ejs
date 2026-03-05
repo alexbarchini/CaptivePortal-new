@@ -97,12 +97,10 @@
                   <th class="col-name">Nome</th>
                   <th class="col-created">Criada em</th>
                   <th class="col-authorized">Autorizada em</th>
-                  <th class="col-consumed">Consumida em</th>
                   <th class="col-duration">Duração</th>
                   <th class="col-status">Status</th>
                   <th class="col-ip">IP</th>
                   <th class="col-mac">MAC</th>
-                  <th class="col-ssid">SSID</th>
                   <th class="col-vlan">VLAN</th>
                   <th class="col-apip">AP IP</th>
                   <th>Tipo</th>
@@ -117,12 +115,10 @@
                     <td class="truncate" title="<%= session.nome || '-' %>"><%= session.nome || '-' %></td>
                     <td><span title="<%= formatUtcDateTime(session.created_at) %>"><%= formatUtcDateTime(session.created_at) %></span></td>
                     <td><span title="<%= formatUtcDateTime(session.authorized_at) %>"><%= formatUtcDateTime(session.authorized_at) %></span></td>
-                    <td><span title="<%= formatUtcDateTime(session.consumed_at) %>"><%= formatUtcDateTime(session.consumed_at) %></span></td>
                     <td><%= session.duration_hms || '-' %></td>
                     <td><span class="status-pill status-<%= String(session.status || '').toLowerCase() %>"><%= session.status %></span></td>
                     <td class="truncate" title="<%= session.uip || '-' %>"><%= session.uip || '-' %></td>
                     <td class="truncate" title="<%= session.client_mac || '-' %>"><%= session.client_mac || '-' %></td>
-                    <td class="truncate" title="<%= session.ssid || '-' %>"><%= session.ssid || '-' %></td>
                     <td><%= session.vlan || '-' %></td>
                     <td class="truncate" title="<%= session.apip || '-' %>"><%= session.apip || '-' %></td>
                     <td><%= session.device_type || '-' %></td>

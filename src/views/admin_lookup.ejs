@@ -49,12 +49,10 @@
                   <th class="col-name">Nome</th>
                   <th class="col-created">Criada em</th>
                   <th class="col-authorized">Autorizada em</th>
-                  <th class="col-consumed">Consumida em</th>
                   <th class="col-duration">Duração</th>
                   <th class="col-status">Status</th>
                   <th class="col-ip">IP</th>
                   <th class="col-mac">MAC</th>
-                  <th class="col-ssid">SSID</th>
                   <th class="col-vlan">VLAN</th>
                   <th class="col-apip">AP IP</th>
                 </tr>
@@ -67,12 +65,10 @@
                     <td class="truncate" title="<%= session.nome || '-' %>"><%= session.nome || '-' %></td>
                     <td><%= session.created_at ? new Date(session.created_at).toLocaleString('pt-BR') : '-' %></td>
                     <td><%= session.authorized_at ? new Date(session.authorized_at).toLocaleString('pt-BR') : '-' %></td>
-                    <td><%= session.consumed_at ? new Date(session.consumed_at).toLocaleString('pt-BR') : '-' %></td>
                     <td><%= session.duration_hms || '-' %></td>
                     <td><%= session.status %></td>
                     <td><%= session.uip || '-' %></td>
                     <td class="truncate" title="<%= session.client_mac || '-' %>"><%= session.client_mac || '-' %></td>
-                    <td><%= session.ssid || '-' %></td>
                     <td><%= session.vlan || '-' %></td>
                     <td><%= session.apip || '-' %></td>
                   </tr>

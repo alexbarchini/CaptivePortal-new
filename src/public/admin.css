@@ -131,8 +131,8 @@
 
 .admin-table {
   width: 100%;
-  min-width: 1400px;
-  table-layout: fixed;
+  min-width: 100%;
+  table-layout: auto;
   border-collapse: collapse;
   margin-top: 0;
   font-size: 0.84rem;
@@ -158,9 +158,10 @@
 }
 
 .admin-table .truncate {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .status-pill {
@@ -179,14 +180,12 @@
 .col-cpf { width: 130px; }
 .col-name { width: 220px; }
 .col-created,
-.col-authorized,
-.col-consumed { width: 165px; }
+.col-authorized { width: 165px; }
 .col-duration { width: 84px; }
 .col-status { width: 98px; }
 .col-ip,
 .col-apip { width: 130px; }
 .col-mac { width: 150px; }
-.col-ssid { width: 130px; }
 .col-vlan { width: 80px; }
 
 @media (max-width: 1024px) {
