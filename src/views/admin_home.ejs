@@ -5,20 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title><%= title %></title>
   <link rel="stylesheet" href="/public/style.css" />
+  <link rel="stylesheet" href="/public/admin.css" />
 </head>
 <body>
-  <%- include('partials/header') %>
-  <main class="container">
-    <section class="card">
+  <%- include('partials/admin_header', { showLogout: true }) %>
+  <main class="admin-shell">
+    <section class="card admin-card">
       <h2>Painel administrativo</h2>
       <p class="subtle">Logado como <strong><%= adminUser %></strong></p>
       <form method="get" action="/admin/lookup">
         <label>CPF</label>
         <input name="cpf" required placeholder="000.000.000-00" />
         <button type="submit">Consultar</button>
-      </form>
-      <form method="post" action="/admin/logout">
-        <button class="btn-danger" type="submit">Sair</button>
       </form>
     </section>
   </main>

@@ -1,0 +1,119 @@
+.admin-shell {
+  width: min(95vw, 1400px);
+  margin: 24px auto;
+  padding: 16px;
+}
+
+.admin-card {
+  border: 1px solid #d8dde6;
+  border-radius: 14px;
+  background: #fff;
+  max-width: none;
+}
+
+.admin-header {
+  padding: 12px 24px;
+}
+
+.admin-logo-wrap {
+  width: min(95vw, 1400px);
+  max-width: none;
+  margin: 0 auto;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.admin-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.admin-logout-form {
+  margin: 0;
+}
+
+.admin-logout-btn {
+  margin-top: 0;
+  width: auto;
+  min-width: 96px;
+  background: var(--danger);
+}
+
+.admin-filters {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  align-items: end;
+}
+
+.admin-filters button {
+  width: 100%;
+}
+
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid #d8dde6;
+  border-radius: 10px;
+}
+
+.admin-table {
+  width: 100%;
+  min-width: 1100px;
+  table-layout: fixed;
+  border-collapse: collapse;
+  margin-top: 0;
+  font-size: 0.84rem;
+}
+
+.admin-table th,
+.admin-table td {
+  border: 1px solid #d8dde6;
+  padding: 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.admin-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f3f6fb;
+}
+
+.admin-table .truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.col-lsid { width: 190px; }
+.col-cpf { width: 120px; }
+.col-name { width: 170px; }
+.col-created,
+.col-authorized,
+.col-consumed { width: 145px; }
+.col-duration { width: 84px; }
+.col-status { width: 95px; }
+.col-ip,
+.col-apip { width: 120px; }
+.col-mac { width: 135px; }
+.col-ssid { width: 120px; }
+.col-vlan { width: 80px; }
+
+@media (max-width: 700px) {
+  .admin-logo-wrap {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .admin-brand {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .admin-logout-btn {
+    width: 100%;
+  }
+}
