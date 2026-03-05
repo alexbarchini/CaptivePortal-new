@@ -14,9 +14,6 @@
       <h2>Login administrativo</h2>
       <% if (error) { %><div class="alert error"><%= error %></div><% } %>
       <form method="post" action="/admin/login">
-        <label>Usuário</label>
-        <input name="user" required />
-
         <label>Senha</label>
         <input name="password" type="password" required />
 

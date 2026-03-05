@@ -34,7 +34,7 @@ const OTP_RESEND_COOLDOWN_SECONDS = Number(process.env.OTP_RESEND_COOLDOWN_SECON
 const OTP_VALID_REUSE_WINDOW_SECONDS = Number(process.env.OTP_VALID_REUSE_WINDOW_SECONDS || 120);
 const LOGIN_SESSION_TTL_SECONDS = Number(process.env.LOGIN_SESSION_TTL_SECONDS || 600);
 const ADMIN_SESSION_COOKIE_NAME = 'admin_session';
-const ADMIN_SESSION_TTL_MS = Number(process.env.ADMIN_SESSION_TTL_HOURS || 8) * 60 * 60 * 1000;
+const ADMIN_SESSION_TTL_MS = Number(process.env.ADMIN_SESSION_TTL_MINUTES || 30) * 60 * 1000;
 const ADMIN_ALLOWED_CIDRS = String(process.env.ADMIN_ALLOWED_CIDRS || '10.9.62.0/23').split(',').map((item) => item.trim()).filter(Boolean);
 const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_PASSWORD_HASH || 'admin-session-secret';
 const smsProvider = buildSmsProvider();
@@ -363,8 +363,13 @@ function normalizeMacForFilter(mac = '') {
 function normalizeClientIp(ip = '') {
   if (!ip) return '';
   const value = String(ip).trim();
-  if (value.startsWith('::ffff:')) return value.replace('::ffff:', '');
-  return value;
+  const firstValue = value.includes(',') ? value.split(',')[0].trim() : value;
+  if (firstValue.startsWith('::ffff:')) return firstValue.replace('::ffff:', '');
+  return firstValue;
+}
+
+function getRequestClientIp(req) {
+  return normalizeClientIp(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '');
 }
 
 const ADMIN_STATUS_VALUES = ['open', 'closed'];
@@ -433,7 +438,14 @@ function parseAdminSessionToken(token = '') {
 }
 
 function allowCidrs(req, res, next) {
-  if (isIpAllowedByCidrs(req.ip)) return next();
+  const clientIp = getRequestClientIp(req);
+  if (isIpAllowedByCidrs(clientIp)) return next();
+  logInfo('admin_access_denied_ip_not_allowed', {
+    request_ip: clientIp || null,
+    path: req.originalUrl,
+    method: req.method,
+    allowed_cidrs: ADMIN_ALLOWED_CIDRS
+  });
   return res.status(403).send('Acesso administrativo não permitido para este IP.');
 }
 
@@ -787,26 +799,37 @@ app.get('/admin/login', (req, res) => {
 });
 
 app.post('/admin/login', adminLoginLimiter, async (req, res) => {
-  const adminUser = String(process.env.ADMIN_USER || '');
   const adminPasswordHash = String(process.env.ADMIN_PASSWORD_HASH || '');
-  const providedUser = String(req.body.user || '').trim();
   const providedPassword = String(req.body.password || '');
+  const requestIp = getRequestClientIp(req);
 
-  if (!adminUser || !adminPasswordHash) {
+  if (!adminPasswordHash) {
+    logError('admin_login_misconfigured', {
+      request_ip: requestIp || null
+    });
     return res.status(500).render('admin_login', { title: 'Administração', error: 'Admin não configurado no ambiente.' });
   }
 
-  const userMatches = providedUser && providedUser === adminUser;
-  const passwordMatches = userMatches ? await argon2.verify(adminPasswordHash, providedPassword) : false;
-  if (!userMatches || !passwordMatches) {
+  const passwordMatches = await argon2.verify(adminPasswordHash, providedPassword);
+  if (!passwordMatches) {
+    logInfo('admin_login_attempt', {
+      status: 'failed',
+      request_ip: requestIp || null
+    });
     return res.status(401).render('admin_login', { title: 'Administração', error: 'Credenciais inválidas.' });
   }
 
-  const token = signAdminSession({ user: adminUser, exp: Date.now() + ADMIN_SESSION_TTL_MS });
+  logInfo('admin_login_attempt', {
+    status: 'success',
+    request_ip: requestIp || null
+  });
+
+  const token = signAdminSession({ user: 'admin', exp: Date.now() + ADMIN_SESSION_TTL_MS });
   res.cookie(ADMIN_SESSION_COOKIE_NAME, token, {
     maxAge: ADMIN_SESSION_TTL_MS,
     httpOnly: true,
-    sameSite: 'lax'
+    secure: true,
+    sameSite: 'strict'
   });
 
   return res.redirect('/admin/sessions');

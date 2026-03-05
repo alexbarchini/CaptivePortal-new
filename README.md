@@ -70,9 +70,8 @@ Copie `.env.example` para `.env` e ajuste:
 - `SMS_API_USERNAME`, `SMS_API_PASSWORD`, `SMS_API_COD_CARTEIRA`, `SMS_API_COD_FORNECEDOR`: credenciais da ClasseA 360.
 
 - `ADMIN_ALLOWED_CIDRS`: lista de CIDRs permitidos no `/admin/*` (default: `10.9.62.0/23`).
-- `ADMIN_USER`: usuário administrador do painel.
 - `ADMIN_PASSWORD_HASH`: hash Argon2 da senha do admin.
-- `ADMIN_SESSION_TTL_HOURS`: duração da sessão administrativa em horas (default: `8`).
+- `ADMIN_SESSION_TTL_MINUTES`: duração da sessão administrativa em minutos (default: `30`).
 - `ADMIN_LOGIN_RATE_LIMIT_PER_MINUTE`: limite de tentativas por minuto em `POST /admin/login` (default: `10`).
 - `ADMIN_SESSION_SECRET`: segredo para assinatura do cookie de sessão admin (se omitido, usa `ADMIN_PASSWORD_HASH`).
 
@@ -116,7 +115,7 @@ Form de cadastro com LGPD:
 Tela de autenticação do painel administrativo (somente IPs permitidos por `ADMIN_ALLOWED_CIDRS`).
 
 ### `POST /admin/login`
-Valida `ADMIN_USER` + `ADMIN_PASSWORD_HASH` (Argon2), aplica rate-limit forte e cria cookie `admin_session` (`httpOnly`, TTL padrão 8h).
+Valida senha com `ADMIN_PASSWORD_HASH` (Argon2), aplica rate-limit forte, registra tentativa em log e cria cookie `admin_session` (`httpOnly`, `secure`, `sameSite=strict`, TTL padrão 30min).
 
 ### `GET /admin`
 Página inicial administrativa com formulário de busca por CPF.
@@ -265,8 +264,7 @@ npm run admin:hash -- "SuaSenhaForteAqui"
 Depois configure no `.env`:
 
 ```env
-ADMIN_USER=admin
 ADMIN_PASSWORD_HASH=$argon2id$...
 ADMIN_ALLOWED_CIDRS=10.9.62.0/23
-ADMIN_SESSION_TTL_HOURS=8
+ADMIN_SESSION_TTL_MINUTES=30
 ```
