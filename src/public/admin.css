@@ -1,7 +1,7 @@
 .admin-shell {
-  width: min(95vw, 1400px);
+  width: min(96vw, 1440px);
   margin: 24px auto;
-  padding: 16px;
+  padding: 8px 12px 20px;
 }
 
 .admin-card {
@@ -16,7 +16,7 @@
 }
 
 .admin-logo-wrap {
-  width: min(95vw, 1400px);
+  width: min(96vw, 1440px);
   max-width: none;
   margin: 0 auto;
   justify-content: space-between;
@@ -27,6 +27,13 @@
   display: flex;
   align-items: center;
   gap: 14px;
+}
+
+.admin-page-title {
+  display: block;
+  margin-top: 3px;
+  color: #4b5c75;
+  font-size: 0.82rem;
 }
 
 .admin-logout-form {
@@ -42,12 +49,34 @@
 
 .admin-filters {
   display: grid;
-  gap: 6px;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 16px;
+}
+
+.filter-field {
+  min-width: 0;
+}
+
+.filter-field label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.filter-field input {
+  width: 100%;
+}
+
+.filter-actions {
+  display: flex;
   align-items: end;
 }
 
-.admin-filters button {
+.filter-actions button {
+  margin-top: 0;
   width: 100%;
 }
 
@@ -60,7 +89,7 @@
 
 .admin-table {
   width: 100%;
-  min-width: 1100px;
+  min-width: 1400px;
   table-layout: fixed;
   border-collapse: collapse;
   margin-top: 0;
@@ -69,17 +98,21 @@
 
 .admin-table th,
 .admin-table td {
-  border: 1px solid #d8dde6;
+  border-bottom: 1px solid #d8dde6;
   padding: 8px;
   text-align: left;
-  vertical-align: top;
+  vertical-align: middle;
 }
 
 .admin-table thead th {
   position: sticky;
   top: 0;
   z-index: 1;
-  background: #f3f6fb;
+  background: #e7eef9;
+}
+
+.admin-table tbody tr:nth-child(even) {
+  background: #f9fbff;
 }
 
 .admin-table .truncate {
@@ -88,19 +121,37 @@
   white-space: nowrap;
 }
 
-.col-lsid { width: 190px; }
-.col-cpf { width: 120px; }
-.col-name { width: 170px; }
+.status-pill {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.status-open { background: #fff3cd; color: #6a4b00; }
+.status-authorized { background: #d1fae5; color: #065f46; }
+.status-closed { background: #e5e7eb; color: #374151; }
+
+.col-lsid { width: 210px; }
+.col-cpf { width: 130px; }
+.col-name { width: 220px; }
 .col-created,
 .col-authorized,
-.col-consumed { width: 145px; }
+.col-consumed { width: 150px; }
 .col-duration { width: 84px; }
-.col-status { width: 95px; }
+.col-status { width: 98px; }
 .col-ip,
-.col-apip { width: 120px; }
-.col-mac { width: 135px; }
-.col-ssid { width: 120px; }
+.col-apip { width: 130px; }
+.col-mac { width: 140px; }
+.col-ssid { width: 130px; }
 .col-vlan { width: 80px; }
+
+@media (max-width: 1024px) {
+  .admin-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 
 @media (max-width: 700px) {
   .admin-logo-wrap {
@@ -110,7 +161,10 @@
 
   .admin-brand {
     align-items: flex-start;
-    flex-direction: column;
+  }
+
+  .admin-filters {
+    grid-template-columns: 1fr;
   }
 
   .admin-logout-btn {
