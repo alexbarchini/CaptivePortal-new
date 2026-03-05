@@ -22,6 +22,7 @@ input { width:100%; border:1px solid #c9d2de; border-radius:10px; padding:10px; 
 .check { display:flex; gap:8px; align-items:flex-start; font-size:.9rem; margin-top:10px; }
 .check input { width:auto; margin-top:2px; }
 button { margin-top:16px; width:100%; background: var(--primary); color:#fff; border:0; border-radius:10px; padding:12px; font-weight:600; cursor:pointer; }
+button:disabled { background: #9aa4b2; color: #eef2f7; cursor: not-allowed; }
 .alert { padding: 12px; border-radius: 10px; margin-bottom: 8px; font-size: .9rem; }
 .alert.error { background:#fde9e9; color:var(--danger); }
 .alert.ok { background:#e6f5eb; color:var(--ok); }
