@@ -28,7 +28,7 @@ function getEndpoints(nbiIP) {
 }
 
 function responseCode(data) {
-  return String(data?.ResponseCode ?? '');
+  return String(data?.ResponseCode ?? '').trim();
 }
 
 function isSuccess(data) {
