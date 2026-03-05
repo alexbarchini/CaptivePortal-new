@@ -237,6 +237,20 @@ function normalizeClientIp(ip = '') {
   return value;
 }
 
+const ADMIN_STATUS_VALUES = ['open', 'closed'];
+
+function normalizeAdminStatusFilter(rawStatus) {
+  const statusList = Array.isArray(rawStatus) ? rawStatus : [rawStatus];
+  const normalized = statusList
+    .flatMap((value) => String(value || '').split(','))
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => ADMIN_STATUS_VALUES.includes(value));
+
+  const unique = [...new Set(normalized)];
+  if (unique.length === 0) return [...ADMIN_STATUS_VALUES];
+  return unique;
+}
+
 
 function ipToInteger(ip = '') {
   const normalized = normalizeClientIp(ip);
@@ -550,12 +564,13 @@ app.get('/admin/sessions', async (req, res) => {
   const offset = Number.isInteger(offsetRaw) && offsetRaw > 0 ? offsetRaw : 0;
   const fromIso = parseDatetimeLocal(fromRaw);
   const toIso = parseDatetimeLocal(toRaw);
+  const statusFilter = normalizeAdminStatusFilter(req.query.status);
 
   if (cpfNormalized && cpfNormalized.length !== 11) {
     return res.status(400).render('admin_sessions', {
       title: 'Sessões administrativas',
       adminUser: req.adminSession.user,
-      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw },
+      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw, status: statusFilter },
       error: 'CPF inválido para consulta.',
       sessions: [],
       pagination: { limit: 50, offset, hasNextPage: false, nextOffset: offset + 50 }
@@ -566,7 +581,7 @@ app.get('/admin/sessions', async (req, res) => {
     return res.status(400).render('admin_sessions', {
       title: 'Sessões administrativas',
       adminUser: req.adminSession.user,
-      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw },
+      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw, status: statusFilter },
       error: 'MAC inválido para consulta.',
       sessions: [],
       pagination: { limit: 50, offset, hasNextPage: false, nextOffset: offset + 50 }
@@ -577,7 +592,7 @@ app.get('/admin/sessions', async (req, res) => {
     return res.status(400).render('admin_sessions', {
       title: 'Sessões administrativas',
       adminUser: req.adminSession.user,
-      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw },
+      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw, status: statusFilter },
       error: 'Intervalo de data/hora inválido.',
       sessions: [],
       pagination: { limit: 50, offset, hasNextPage: false, nextOffset: offset + 50 }
@@ -597,6 +612,13 @@ app.get('/admin/sessions', async (req, res) => {
   if (macNormalized) pushFilter("UPPER(regexp_replace(COALESCE(ls.client_mac, ''), '[^A-Fa-f0-9]', '', 'g')) = ?", macNormalized);
   if (fromIso) pushFilter('ls.created_at >= ?', fromIso);
   if (toIso) pushFilter('ls.created_at <= ?', toIso);
+  if (statusFilter.length > 0) {
+    const placeholders = statusFilter.map((status) => {
+      values.push(status);
+      return `$${values.length}`;
+    });
+    filters.push(`(CASE WHEN ls.consumed_at IS NULL THEN 'open' ELSE 'closed' END) IN (${placeholders.join(', ')})`);
+  }
 
   values.push(51, offset);
   const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
@@ -626,7 +648,7 @@ app.get('/admin/sessions', async (req, res) => {
   const hasNextPage = sessionsResult.rows.length > 50;
   const sessions = sessionsResult.rows.slice(0, 50).map((session) => ({
     ...session,
-    status: !session.authorized_at ? 'OPEN' : (session.consumed_at ? 'CLOSED' : 'AUTHORIZED'),
+    status: session.consumed_at ? 'CLOSED' : 'OPEN',
     duration_hms: formatDurationHms(session.duration_seconds)
   }));
 
@@ -637,6 +659,7 @@ app.get('/admin/sessions', async (req, res) => {
     mac_filter: macNormalized || null,
     from_filter: fromIso,
     to_filter: toIso,
+    status_filter: statusFilter,
     offset,
     result_count: sessions.length,
     admin_user: req.adminSession.user,
@@ -646,7 +669,7 @@ app.get('/admin/sessions', async (req, res) => {
   return res.render('admin_sessions', {
     title: 'Sessões administrativas',
     adminUser: req.adminSession.user,
-    filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw },
+    filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw, status: statusFilter },
     error: null,
     sessions,
     pagination: { limit: 50, offset, hasNextPage, nextOffset: offset + 50 }

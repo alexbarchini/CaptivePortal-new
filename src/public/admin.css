@@ -71,6 +71,31 @@
   width: 100%;
 }
 
+
+.filter-status {
+  grid-column: span 2;
+}
+
+.filter-label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.checkbox-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 12px;
+  font-size: 0.92rem;
+}
+
+.checkbox-inline input {
+  width: auto;
+  margin: 0;
+}
+
 .filter-actions {
   display: flex;
   align-items: end;

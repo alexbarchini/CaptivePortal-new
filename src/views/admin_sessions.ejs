@@ -45,6 +45,16 @@
           <input id="to" name="to" type="datetime-local" value="<%= filters?.to || '' %>" />
         </div>
 
+        <div class="filter-field filter-status">
+          <span class="filter-label">Status</span>
+          <label class="checkbox-inline">
+            <input type="checkbox" name="status" value="open" <%= (filters?.status || []).includes('open') ? 'checked' : '' %> /> OPEN
+          </label>
+          <label class="checkbox-inline">
+            <input type="checkbox" name="status" value="closed" <%= (filters?.status || []).includes('closed') ? 'checked' : '' %> /> CLOSED
+          </label>
+        </div>
+
         <div class="filter-actions">
           <button type="submit">Pesquisar</button>
         </div>
@@ -106,7 +116,7 @@
           <div class="admin-pagination">
             <span class="subtle">Offset atual: <strong><%= pagination?.offset || 0 %></strong></span>
             <% if (pagination?.hasNextPage) { %>
-              <a class="next-page" href="/admin/sessions?cpf=<%= encodeURIComponent(filters?.cpf || '') %>&name=<%= encodeURIComponent(filters?.name || '') %>&mac=<%= encodeURIComponent(filters?.mac || '') %>&ip=<%= encodeURIComponent(filters?.ip || '') %>&from=<%= encodeURIComponent(filters?.from || '') %>&to=<%= encodeURIComponent(filters?.to || '') %>&offset=<%= pagination?.nextOffset || 50 %>">Próxima página</a>
+              <a class="next-page" href="/admin/sessions?cpf=<%= encodeURIComponent(filters?.cpf || '') %>&name=<%= encodeURIComponent(filters?.name || '') %>&mac=<%= encodeURIComponent(filters?.mac || '') %>&ip=<%= encodeURIComponent(filters?.ip || '') %>&from=<%= encodeURIComponent(filters?.from || '') %>&to=<%= encodeURIComponent(filters?.to || '') %><% (filters?.status || []).forEach((status) => { %>&status=<%= encodeURIComponent(status) %><% }) %>&offset=<%= pagination?.nextOffset || 50 %>">Próxima página</a>
             <% } %>
           </div>
         <% } %>
@@ -115,6 +125,18 @@
   </main>
   <script>
     (() => {
+
+      const filterForm = document.querySelector('.admin-filters');
+      const statusCheckboxes = filterForm ? filterForm.querySelectorAll('input[name="status"]') : [];
+      if (filterForm && statusCheckboxes.length > 0) {
+        filterForm.addEventListener('submit', () => {
+          const selectedCount = Array.from(statusCheckboxes).filter((checkbox) => checkbox.checked).length;
+          if (selectedCount === 0) {
+            statusCheckboxes.forEach((checkbox) => { checkbox.checked = true; });
+          }
+        });
+      }
+
       const topScroll = document.querySelector('[data-top-scrollbar]');
       const topInner = document.querySelector('[data-top-scrollbar-inner]');
       const tableWrap = document.querySelector('[data-table-wrap]');
