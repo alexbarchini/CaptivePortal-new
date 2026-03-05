@@ -5,6 +5,7 @@ Portal externo para **Ruckus SmartZone (vSZ-H 6.1.x)** usando fluxo **Hotspot/WI
 ## Arquitetura resumida
 
 1. SmartZone redireciona cliente para `GET /portal` com parâmetros WISPr (ex: `nbiIP`, `UE-IP`, `UE-MAC`, `url/orig_url`, `uip`, `client_mac`, etc).
+   - O portal valida `nbiIP` por allowlist (`SZ_MANAGEMENT_IPS`) e faz failover automático entre nós SmartZone em caso de timeout/erro 5xx.
 2. Portal preserva e reaproveita todos os parâmetros na jornada login/cadastro.
 3. Usuário autentica com `CPF + senha` (validação local no Postgres).
 4. Portal chama NBI:
@@ -56,7 +57,8 @@ Administração em desenvolvimento (Postgres):
 Copie `.env.example` para `.env` e ajuste:
 
 - `NBI_REQUEST_PASSWORD`: senha configurada em **Administration > External Services > WISPr Northbound Interface** na SmartZone.
-- `SZ_MANAGEMENT_IP`: IP de management da controladora.
+- `SZ_MANAGEMENT_IPS`: lista de IPs de management (allowlist/failover), separados por vírgula.
+- `SZ_MANAGEMENT_IP`: fallback legado (opcional) para compatibilidade.
 - `NBI_MOCK=true|false`: modo simulador sem SmartZone.
 - `TERMS_VERSION` e `PRIVACY_VERSION`: versões dos documentos LGPD gravadas no consentimento.
 - `USER_ACCOUNT_VALIDITY_DAYS`: validade da conta no portal em dias (default: `30`).

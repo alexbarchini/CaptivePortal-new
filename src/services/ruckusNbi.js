@@ -3,7 +3,7 @@ const https = require('https');
 const crypto = require('crypto');
 const { logInfo, logError } = require('../utils/logger');
 
-const REQUEST_TIMEOUT_MS = 5000;
+const REQUEST_TIMEOUT_MS = Number(process.env.NBI_REQUEST_TIMEOUT_MS || 3000);
 const STATUS_POLL_INTERVAL_MS = 1000;
 const STATUS_POLL_TIMEOUT_MS = 15000;
 const NBI_DEBUG = (process.env.NBI_DEBUG || 'false').toLowerCase() === 'true';
@@ -43,6 +43,19 @@ function isPending(data) {
 function isFailed(data) {
   const code = Number(responseCode(data));
   return Number.isFinite(code) && code >= 301;
+}
+
+function isRetryableNbiError(error) {
+  const statusCode = Number(error?.response?.status || 0);
+  if (Number.isFinite(statusCode) && statusCode >= 500) return true;
+
+  const code = String(error?.code || '').toUpperCase();
+  return code === 'ECONNABORTED'
+    || code === 'ECONNREFUSED'
+    || code === 'EHOSTUNREACH'
+    || code === 'ENETUNREACH'
+    || code === 'ETIMEDOUT'
+    || code === 'ERR_NETWORK';
 }
 
 
@@ -385,4 +398,4 @@ async function statusAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword }
   };
 }
 
-module.exports = { loginAsync, disconnectAsync, statusAsync };
+module.exports = { loginAsync, disconnectAsync, statusAsync, isRetryableNbiError };
