@@ -5,6 +5,7 @@ services:
     env_file:
       - .env
     environment:
+      TZ: America/Sao_Paulo
       PORT: 3000
       DB_HOST: postgres
       DB_PORT: 5432
@@ -29,11 +30,13 @@ services:
     image: postgres:16-alpine
     container_name: captive-portal-db
     environment:
+      TZ: America/Sao_Paulo
       POSTGRES_DB: captive_portal
       POSTGRES_USER: portal
       POSTGRES_PASSWORD: portal123
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
 
   freeradius:
     image: freeradius/freeradius-server:latest
