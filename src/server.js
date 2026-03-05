@@ -1227,7 +1227,7 @@ async function verifySmsHandler(req, res) {
     }
 
     await enforceMaxOpenSessions(session.user_id, session.id, 5);
-    await pool.query(`UPDATE login_sessions SET consumed_at = NOW(), authorized_at = NOW() WHERE id = $1`, [session.id]);
+    await pool.query(`UPDATE login_sessions SET authorized_at = NOW() WHERE id = $1`, [session.id]);
     await pool.query(
       `INSERT INTO portal_active_sessions (id, user_id, ue_ip, ue_mac, ssid, authorized_at, ended_at, last_seen_at, created_at)
        VALUES ($1, $2, $3, $4, $5, NOW(), NULL, NOW(), NOW())

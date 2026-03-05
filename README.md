@@ -210,6 +210,14 @@ Como acompanhar logs:
 
 ---
 
+
+## Teste manual rápido (admin `/admin`)
+
+1. Autenticar no portal com um usuário válido e concluir o fluxo de autorização: a sessão deve aparecer como **OPEN** no admin (`consumed_at = NULL`).
+2. Fazer logout explícito pelo botão **Logout** no portal: a mesma sessão deve mudar para **CLOSED** com `consumed_at` preenchido.
+3. Autenticar 6 vezes com o mesmo usuário: o sistema deve manter no máximo **5 sessões OPEN**, fechando as mais antigas e preservando a sessão atual (`keepLsid`).
+4. No admin, confirmar que as colunas `created_at`, `authorized_at` e `consumed_at` são exibidas em **UTC (GMT)**.
+
 ## Testar sem SmartZone (modo simulador)
 
 Com `NBI_MOCK=true` (ou query `mock=1`):
