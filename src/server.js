@@ -527,14 +527,14 @@ app.post('/admin/login', adminLoginLimiter, async (req, res) => {
     sameSite: 'lax'
   });
 
-  return res.redirect('/admin');
+  return res.redirect('/admin/sessions');
 });
 
 app.get('/admin', (req, res) => {
-  res.render('admin_home', { title: 'Painel Administrativo', adminUser: req.adminSession.user });
+  return res.redirect('/admin/sessions');
 });
 
-app.get('/admin/lookup', async (req, res) => {
+app.get('/admin/sessions', async (req, res) => {
   const cpfNormalized = cleanDigits(String(req.query.cpf || ''));
   const nameQuery = String(req.query.name || '').trim();
   const fromRaw = String(req.query.from || '').trim();
@@ -545,8 +545,8 @@ app.get('/admin/lookup', async (req, res) => {
   const toIso = parseDatetimeLocal(toRaw);
 
   if (cpfNormalized && cpfNormalized.length !== 11) {
-    return res.status(400).render('admin_lookup', {
-      title: 'Consulta administrativa',
+    return res.status(400).render('admin_sessions', {
+      title: 'Sessões administrativas',
       adminUser: req.adminSession.user,
       filters: { cpf: cpfNormalized, name: nameQuery, from: fromRaw, to: toRaw },
       error: 'CPF inválido para consulta.',
@@ -556,8 +556,8 @@ app.get('/admin/lookup', async (req, res) => {
   }
 
   if ((fromRaw && !fromIso) || (toRaw && !toIso)) {
-    return res.status(400).render('admin_lookup', {
-      title: 'Consulta administrativa',
+    return res.status(400).render('admin_sessions', {
+      title: 'Sessões administrativas',
       adminUser: req.adminSession.user,
       filters: { cpf: cpfNormalized, name: nameQuery, from: fromRaw, to: toRaw },
       error: 'Intervalo de data/hora inválido.',
@@ -621,8 +621,8 @@ app.get('/admin/lookup', async (req, res) => {
     request_ip: normalizeClientIp(req.ip)
   });
 
-  return res.render('admin_lookup', {
-    title: 'Consulta administrativa',
+  return res.render('admin_sessions', {
+    title: 'Sessões administrativas',
     adminUser: req.adminSession.user,
     filters: { cpf: cpfNormalized, name: nameQuery, from: fromRaw, to: toRaw },
     error: null,
@@ -631,6 +631,11 @@ app.get('/admin/lookup', async (req, res) => {
   });
 });
 
+
+app.get('/admin/lookup', (req, res) => {
+  const query = new URLSearchParams(req.query || {}).toString();
+  return res.redirect(query ? `/admin/sessions?${query}` : '/admin/sessions');
+});
 app.post('/admin/logout', (req, res) => {
   res.clearCookie(ADMIN_SESSION_COOKIE_NAME, { httpOnly: true, sameSite: 'lax' });
   return res.redirect('/admin/login');
