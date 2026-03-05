@@ -5,11 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title><%= title %></title>
   <link rel="stylesheet" href="/public/style.css" />
+  <link rel="stylesheet" href="/public/admin.css" />
 </head>
 <body>
-  <%- include('partials/header') %>
-  <main class="container">
-    <section class="card wide admin-card">
+  <%- include('partials/admin_header', { showLogout: true }) %>
+  <main class="admin-shell">
+    <section class="card admin-card">
       <h2>Consulta administrativa</h2>
       <p class="subtle">Administrador: <strong><%= adminUser %></strong></p>
       <p><a href="/admin">Voltar</a></p>
@@ -39,38 +40,38 @@
         <% if (!sessions || sessions.length === 0) { %>
           <div class="alert">Nenhum resultado encontrado para os filtros informados.</div>
         <% } else { %>
-          <div class="admin-table-wrap">
+          <div class="table-wrap">
             <table class="admin-table">
               <thead>
                 <tr>
-                  <th>LSID</th>
-                  <th>Nome</th>
-                  <th>CPF</th>
-                  <th>Criada em</th>
-                  <th>Autorizada em</th>
-                  <th>Consumida em</th>
-                  <th>Duração</th>
-                  <th>Status</th>
-                  <th>IP</th>
-                  <th>MAC</th>
-                  <th>SSID</th>
-                  <th>VLAN</th>
-                  <th>AP IP</th>
+                  <th class="col-lsid">LSID</th>
+                  <th class="col-cpf">CPF</th>
+                  <th class="col-name">Nome</th>
+                  <th class="col-created">Criada em</th>
+                  <th class="col-authorized">Autorizada em</th>
+                  <th class="col-consumed">Consumida em</th>
+                  <th class="col-duration">Duração</th>
+                  <th class="col-status">Status</th>
+                  <th class="col-ip">IP</th>
+                  <th class="col-mac">MAC</th>
+                  <th class="col-ssid">SSID</th>
+                  <th class="col-vlan">VLAN</th>
+                  <th class="col-apip">AP IP</th>
                 </tr>
               </thead>
               <tbody>
                 <% sessions.forEach((session) => { %>
                   <tr>
-                    <td class="lsid-cell" title="<%= session.lsid %>"><%= session.lsid %></td>
-                    <td><%= session.nome || '-' %></td>
+                    <td class="truncate" title="<%= session.lsid %>"><%= session.lsid %></td>
                     <td><%= session.cpf_formatado || session.cpf_normalizado || '-' %></td>
+                    <td class="truncate" title="<%= session.nome || '-' %>"><%= session.nome || '-' %></td>
                     <td><%= session.created_at ? new Date(session.created_at).toLocaleString('pt-BR') : '-' %></td>
                     <td><%= session.authorized_at ? new Date(session.authorized_at).toLocaleString('pt-BR') : '-' %></td>
                     <td><%= session.consumed_at ? new Date(session.consumed_at).toLocaleString('pt-BR') : '-' %></td>
                     <td><%= session.duration_hms || '-' %></td>
                     <td><%= session.status %></td>
                     <td><%= session.uip || '-' %></td>
-                    <td><%= session.client_mac || '-' %></td>
+                    <td class="truncate" title="<%= session.client_mac || '-' %>"><%= session.client_mac || '-' %></td>
                     <td><%= session.ssid || '-' %></td>
                     <td><%= session.vlan || '-' %></td>
                     <td><%= session.apip || '-' %></td>

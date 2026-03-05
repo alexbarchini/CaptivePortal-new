@@ -5,10 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title><%= title %></title>
   <link rel="stylesheet" href="/public/style.css" />
+  <link rel="stylesheet" href="/public/admin.css" />
 </head>
 <body>
-  <main class="container">
-    <section class="card">
+  <%- include('partials/admin_header', { showLogout: false }) %>
+  <main class="admin-shell">
+    <section class="card admin-card">
       <h2>Login administrativo</h2>
       <% if (error) { %><div class="alert error"><%= error %></div><% } %>
       <form method="post" action="/admin/login">

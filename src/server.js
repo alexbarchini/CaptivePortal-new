@@ -65,6 +65,10 @@ app.use('/register', authLimiter);
 app.use('/login', authLimiter);
 app.use('/verify/sms', verifyLimiter);
 app.use('/otp/verify', verifyLimiter);
+app.use('/admin', allowCidrs, (req, res, next) => {
+  if (req.path === '/login') return next();
+  return requireAdminSession(req, res, next);
+});
 
 function getOriginalUrl(params) {
   const candidate = params.url || params.orig_url || '/success';
@@ -496,11 +500,11 @@ class AuthFlowError extends Error {
 app.get('/healthz', (_, res) => res.json({ status: 'ok' }));
 
 
-app.get('/admin/login', allowCidrs, (req, res) => {
+app.get('/admin/login', (req, res) => {
   res.render('admin_login', { title: 'Administração', error: null });
 });
 
-app.post('/admin/login', allowCidrs, adminLoginLimiter, async (req, res) => {
+app.post('/admin/login', adminLoginLimiter, async (req, res) => {
   const adminUser = String(process.env.ADMIN_USER || '');
   const adminPasswordHash = String(process.env.ADMIN_PASSWORD_HASH || '');
   const providedUser = String(req.body.user || '').trim();
@@ -526,11 +530,11 @@ app.post('/admin/login', allowCidrs, adminLoginLimiter, async (req, res) => {
   return res.redirect('/admin');
 });
 
-app.get('/admin', allowCidrs, requireAdminSession, (req, res) => {
+app.get('/admin', (req, res) => {
   res.render('admin_home', { title: 'Painel Administrativo', adminUser: req.adminSession.user });
 });
 
-app.get('/admin/lookup', allowCidrs, requireAdminSession, async (req, res) => {
+app.get('/admin/lookup', async (req, res) => {
   const cpfNormalized = cleanDigits(String(req.query.cpf || ''));
   const nameQuery = String(req.query.name || '').trim();
   const fromRaw = String(req.query.from || '').trim();
@@ -627,8 +631,8 @@ app.get('/admin/lookup', allowCidrs, requireAdminSession, async (req, res) => {
   });
 });
 
-app.post('/admin/logout', allowCidrs, requireAdminSession, (req, res) => {
-  res.clearCookie(ADMIN_SESSION_COOKIE_NAME);
+app.post('/admin/logout', (req, res) => {
+  res.clearCookie(ADMIN_SESSION_COOKIE_NAME, { httpOnly: true, sameSite: 'lax' });
   return res.redirect('/admin/login');
 });
 

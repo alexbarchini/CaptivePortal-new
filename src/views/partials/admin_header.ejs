@@ -1,0 +1,16 @@
+<header class="header admin-header">
+  <div class="logo-wrap admin-logo-wrap">
+    <div class="admin-brand">
+      <img src="/public/trt9-logo.jpg" alt="Justiça do Trabalho TRT da 9ª Região" class="logo"/>
+      <div class="header-title-wrap">
+        <h1>JUSTIÇA DO TRABALHO</h1>
+        <p>TRT da 9ª Região (PR)</p>
+      </div>
+    </div>
+    <% if (showLogout) { %>
+      <form method="post" action="/admin/logout" class="admin-logout-form">
+        <button class="admin-logout-btn" type="submit">Sair</button>
+      </form>
+    <% } %>
+  </div>
+</header>
