@@ -38,6 +38,7 @@ const ADMIN_SESSION_TTL_MS = Number(process.env.ADMIN_SESSION_TTL_HOURS || 8) * 
 const ADMIN_ALLOWED_CIDRS = String(process.env.ADMIN_ALLOWED_CIDRS || '10.9.62.0/23').split(',').map((item) => item.trim()).filter(Boolean);
 const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_PASSWORD_HASH || 'admin-session-secret';
 const smsProvider = buildSmsProvider();
+const DISPLAY_TIME_ZONE = 'America/Sao_Paulo';
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
@@ -94,16 +95,20 @@ function sanitizeParams(params = {}) {
 
 function normalizeDeviceName(rawValue = '') {
   const value = String(rawValue || '').trim();
-  return value ? value.slice(0, 255) : null;
+  if (!value) return null;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) return null;
+  if (/^[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,7}$/i.test(value)) return null;
+  if (/^[a-f0-9]{12}$/i.test(value.replace(/[^a-f0-9]/gi, ''))) return null;
+  return value.slice(0, 255);
 }
 
 function getDeviceNameFromRequest(req, context = {}) {
   const candidates = [
-    req?.hostname,
     req?.headers?.['x-client-name'],
     req?.headers?.['x-device-name'],
     context?.hostname,
-    context?.client_name
+    context?.client_name,
+    context?.device_name
   ];
 
   for (const candidate of candidates) {
@@ -112,6 +117,27 @@ function getDeviceNameFromRequest(req, context = {}) {
   }
 
   return null;
+}
+
+function friendlyDeviceNameFromUserAgent(userAgent = '') {
+  const ua = String(userAgent || '');
+  if (!ua) return null;
+  if (/iphone/i.test(ua)) return 'iPhone';
+  if (/ipad/i.test(ua)) return 'iPad';
+  if (/android/i.test(ua)) return 'Android';
+  if (/windows nt/i.test(ua)) return 'Windows';
+  if (/mac os x|macintosh/i.test(ua) && !/iphone|ipad|ipod/i.test(ua)) return 'macOS';
+  if (/linux/i.test(ua) && !/android/i.test(ua)) return 'Linux';
+  return null;
+}
+
+function resolveDeviceDisplayName(session = {}) {
+  const explicitName = normalizeDeviceName(session.device_name);
+  if (explicitName) return explicitName;
+  const fromAgent = friendlyDeviceNameFromUserAgent(session.user_agent || session.ua);
+  if (fromAgent) return fromAgent;
+  if (session.device_type && session.device_type !== 'Unknown') return session.device_type;
+  return '-';
 }
 
 function buildCtxFromSession(session = {}) {
@@ -213,12 +239,14 @@ function formatDateTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '-';
   return new Intl.DateTimeFormat('pt-BR', {
-    timeZone: LOG_TZ,
+    timeZone: DISPLAY_TIME_ZONE,
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
     hour: '2-digit',
-    minute: '2-digit'
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
   }).format(date);
 }
 function formatDurationSince(value) {
@@ -498,9 +526,9 @@ async function createPortalSession(req, params) {
   const deviceName = getDeviceNameFromRequest(req, params);
   await pool.query(
     `INSERT INTO login_sessions (
-      id, ctx_json, nbi_ip, uip, client_mac, proxy, ssid, sip, dn, wlan_name, url, apip, vlan, expires_at, device_type, device_name
+      id, ctx_json, nbi_ip, uip, client_mac, proxy, ssid, sip, dn, wlan_name, url, apip, vlan, expires_at, device_type, device_name, user_agent
     ) VALUES (
-      $1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + ($14 || ' seconds')::interval, $15, $16
+      $1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + ($14 || ' seconds')::interval, $15, $16, $17
     )`,
     [
       lsid,
@@ -518,7 +546,8 @@ async function createPortalSession(req, params) {
       ctx.vlan,
       LOGIN_SESSION_TTL_SECONDS,
       deviceType,
-      deviceName
+      deviceName,
+      req.get('user-agent') || ''
     ]
   );
   logCtxPresence('portal_ctx_captured', lsid, ctx);
@@ -780,6 +809,7 @@ app.get('/admin/sessions', async (req, res) => {
             ls.apip,
             ls.device_type,
             ls.device_name,
+            ls.user_agent,
             u.nome,
             u.cpf_formatado,
             u.cpf_normalizado,
@@ -797,7 +827,10 @@ app.get('/admin/sessions', async (req, res) => {
   const sessions = sessionsResult.rows.slice(0, 50).map((session) => ({
     ...session,
     status: session.consumed_at ? 'CLOSED' : 'OPEN',
-    duration_hms: formatDurationHms(session.duration_seconds)
+    duration_hms: formatDurationHms(session.duration_seconds),
+    created_at_label: formatDateTime(session.created_at),
+    authorized_at_label: formatDateTime(session.authorized_at),
+    device_display_name: resolveDeviceDisplayName(session)
   }));
 
   logInfo('admin_lookup', {
@@ -1261,11 +1294,12 @@ async function verifySmsHandler(req, res) {
     await enforceMaxOpenSessions(session.user_id, session.id, 5);
     await pool.query(
       `UPDATE login_sessions
-       SET authorized_at = NOW(),
+       SET authorized_at = COALESCE(authorized_at, NOW()),
            device_type = $2,
-           device_name = $3
+           device_name = COALESCE($3, device_name),
+           user_agent = COALESCE(NULLIF($4, ''), user_agent)
        WHERE id = $1`,
-      [session.id, deviceType, deviceName]
+      [session.id, deviceType, deviceName, req.get('user-agent') || '']
     );
     await pool.query(
       `INSERT INTO portal_active_sessions (id, user_id, ue_ip, ue_mac, ssid, authorized_at, ended_at, last_seen_at, created_at)

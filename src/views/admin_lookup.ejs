@@ -8,6 +8,22 @@
   <link rel="stylesheet" href="/public/admin.css" />
 </head>
 <body>
+  <%
+    const saoPauloFormatter = new Intl.DateTimeFormat('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    });
+    const formatDateTime = (value) => {
+      if (!value) return '-';
+      return saoPauloFormatter.format(new Date(value));
+    };
+  %>
   <%- include('partials/admin_header', { showLogout: true }) %>
   <main class="admin-shell">
     <section class="card admin-card">
@@ -63,8 +79,8 @@
                     <td class="truncate" title="<%= session.lsid %>"><%= session.lsid %></td>
                     <td><%= session.cpf_formatado || session.cpf_normalizado || '-' %></td>
                     <td class="truncate" title="<%= session.nome || '-' %>"><%= session.nome || '-' %></td>
-                    <td><%= session.created_at ? new Date(session.created_at).toLocaleString('pt-BR') : '-' %></td>
-                    <td><%= session.authorized_at ? new Date(session.authorized_at).toLocaleString('pt-BR') : '-' %></td>
+                    <td><%= formatDateTime(session.created_at) %></td>
+                    <td><%= formatDateTime(session.authorized_at) %></td>
                     <td><%= session.duration_hms || '-' %></td>
                     <td><%= session.status %></td>
                     <td><%= session.uip || '-' %></td>
