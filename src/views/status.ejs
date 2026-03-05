@@ -27,6 +27,10 @@
       </div>
 
       <form method="post" action="/logout">
+        <input type="hidden" name="ue_ip" value="<%= ueIpRaw || "" %>" />
+        <input type="hidden" name="ue_mac" value="<%= ueMacRaw || "" %>" />
+        <input type="hidden" name="nbiIP" value="<%= nbiIP || "" %>" />
+        <input type="hidden" name="proxy" value="<%= proxy || "0" %>" />
         <button type="submit" class="btn-danger">Logout</button>
       </form>
     </section>
