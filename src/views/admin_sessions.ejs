@@ -26,6 +26,16 @@
         </div>
 
         <div class="filter-field">
+          <label for="mac">MAC do cliente</label>
+          <input id="mac" name="mac" value="<%= filters?.mac || '' %>" placeholder="AA:BB:CC:DD:EE:FF" />
+        </div>
+
+        <div class="filter-field">
+          <label for="ip">IP do cliente</label>
+          <input id="ip" name="ip" value="<%= filters?.ip || '' %>" placeholder="172.27.0.12" />
+        </div>
+
+        <div class="filter-field">
           <label for="from">De (data/hora)</label>
           <input id="from" name="from" type="datetime-local" value="<%= filters?.from || '' %>" />
         </div>
@@ -49,8 +59,11 @@
         <% if (!sessions || sessions.length === 0) { %>
           <div class="alert">Nenhum resultado encontrado para os filtros informados.</div>
         <% } else { %>
-          <div class="table-wrap">
-            <table class="admin-table">
+          <div class="table-scroll-top" data-top-scrollbar hidden>
+            <div class="table-scroll-top-inner" data-top-scrollbar-inner></div>
+          </div>
+          <div class="table-wrap" data-table-wrap>
+            <table class="admin-table" data-admin-table>
               <thead>
                 <tr>
                   <th class="col-lsid">LSID</th>
@@ -74,16 +87,16 @@
                     <td class="truncate" title="<%= session.lsid %>"><%= session.lsid %></td>
                     <td><%= session.cpf_formatado || session.cpf_normalizado || '-' %></td>
                     <td class="truncate" title="<%= session.nome || '-' %>"><%= session.nome || '-' %></td>
-                    <td><%= session.created_at ? new Date(session.created_at).toLocaleString('pt-BR') : '-' %></td>
-                    <td><%= session.authorized_at ? new Date(session.authorized_at).toLocaleString('pt-BR') : '-' %></td>
-                    <td><%= session.consumed_at ? new Date(session.consumed_at).toLocaleString('pt-BR') : '-' %></td>
+                    <td><span title="<%= session.created_at ? new Date(session.created_at).toLocaleString('pt-BR') : '-' %>"><%= session.created_at ? new Date(session.created_at).toLocaleString('pt-BR') : '-' %></span></td>
+                    <td><span title="<%= session.authorized_at ? new Date(session.authorized_at).toLocaleString('pt-BR') : '-' %>"><%= session.authorized_at ? new Date(session.authorized_at).toLocaleString('pt-BR') : '-' %></span></td>
+                    <td><span title="<%= session.consumed_at ? new Date(session.consumed_at).toLocaleString('pt-BR') : '-' %>"><%= session.consumed_at ? new Date(session.consumed_at).toLocaleString('pt-BR') : '-' %></span></td>
                     <td><%= session.duration_hms || '-' %></td>
                     <td><span class="status-pill status-<%= String(session.status || '').toLowerCase() %>"><%= session.status %></span></td>
-                    <td><%= session.uip || '-' %></td>
-                    <td><%= session.client_mac || '-' %></td>
-                    <td><%= session.ssid || '-' %></td>
+                    <td class="truncate" title="<%= session.uip || '-' %>"><%= session.uip || '-' %></td>
+                    <td class="truncate" title="<%= session.client_mac || '-' %>"><%= session.client_mac || '-' %></td>
+                    <td class="truncate" title="<%= session.ssid || '-' %>"><%= session.ssid || '-' %></td>
                     <td><%= session.vlan || '-' %></td>
-                    <td><%= session.apip || '-' %></td>
+                    <td class="truncate" title="<%= session.apip || '-' %>"><%= session.apip || '-' %></td>
                   </tr>
                 <% }) %>
               </tbody>
@@ -93,12 +106,60 @@
           <div class="admin-pagination">
             <span class="subtle">Offset atual: <strong><%= pagination?.offset || 0 %></strong></span>
             <% if (pagination?.hasNextPage) { %>
-              <a class="next-page" href="/admin/sessions?cpf=<%= encodeURIComponent(filters?.cpf || '') %>&name=<%= encodeURIComponent(filters?.name || '') %>&from=<%= encodeURIComponent(filters?.from || '') %>&to=<%= encodeURIComponent(filters?.to || '') %>&offset=<%= pagination?.nextOffset || 50 %>">Próxima página</a>
+              <a class="next-page" href="/admin/sessions?cpf=<%= encodeURIComponent(filters?.cpf || '') %>&name=<%= encodeURIComponent(filters?.name || '') %>&mac=<%= encodeURIComponent(filters?.mac || '') %>&ip=<%= encodeURIComponent(filters?.ip || '') %>&from=<%= encodeURIComponent(filters?.from || '') %>&to=<%= encodeURIComponent(filters?.to || '') %>&offset=<%= pagination?.nextOffset || 50 %>">Próxima página</a>
             <% } %>
           </div>
         <% } %>
       <% } %>
     </section>
   </main>
+  <script>
+    (() => {
+      const topScroll = document.querySelector('[data-top-scrollbar]');
+      const topInner = document.querySelector('[data-top-scrollbar-inner]');
+      const tableWrap = document.querySelector('[data-table-wrap]');
+      const table = document.querySelector('[data-admin-table]');
+      if (!topScroll || !topInner || !tableWrap || !table) return;
+
+      let syncingFromTop = false;
+      let syncingFromBottom = false;
+
+      const syncVisibilityAndWidth = () => {
+        const wrapWidth = tableWrap.clientWidth;
+        const tableWidth = table.scrollWidth;
+        topInner.style.width = `${tableWidth}px`;
+        const shouldShow = tableWidth > wrapWidth + 1;
+        topScroll.hidden = !shouldShow;
+        if (!shouldShow) {
+          topScroll.scrollLeft = 0;
+          tableWrap.scrollLeft = 0;
+        } else {
+          topScroll.scrollLeft = tableWrap.scrollLeft;
+        }
+      };
+
+      topScroll.addEventListener('scroll', () => {
+        if (syncingFromBottom) return;
+        syncingFromTop = true;
+        tableWrap.scrollLeft = topScroll.scrollLeft;
+        syncingFromTop = false;
+      });
+
+      tableWrap.addEventListener('scroll', () => {
+        if (syncingFromTop) return;
+        syncingFromBottom = true;
+        topScroll.scrollLeft = tableWrap.scrollLeft;
+        syncingFromBottom = false;
+      });
+
+      window.addEventListener('resize', syncVisibilityAndWidth);
+      if (window.ResizeObserver) {
+        const observer = new ResizeObserver(syncVisibilityAndWidth);
+        observer.observe(tableWrap);
+        observer.observe(table);
+      }
+      syncVisibilityAndWidth();
+    })();
+  </script>
 </body>
 </html>

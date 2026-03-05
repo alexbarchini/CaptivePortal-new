@@ -49,7 +49,7 @@
 
 .admin-filters {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(12, minmax(0, 1fr));
   gap: 12px;
   align-items: end;
   margin-bottom: 16px;
@@ -57,6 +57,7 @@
 
 .filter-field {
   min-width: 0;
+  grid-column: span 3;
 }
 
 .filter-field label {
@@ -73,11 +74,27 @@
 .filter-actions {
   display: flex;
   align-items: end;
+  grid-column: span 2;
 }
 
 .filter-actions button {
   margin-top: 0;
   width: 100%;
+}
+
+.table-scroll-top {
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  height: 14px;
+  margin-bottom: 6px;
+  border: 1px solid #d8dde6;
+  border-radius: 10px;
+  background: #f3f6fb;
+}
+
+.table-scroll-top-inner {
+  height: 1px;
 }
 
 .table-wrap {
@@ -138,18 +155,23 @@
 .col-name { width: 220px; }
 .col-created,
 .col-authorized,
-.col-consumed { width: 150px; }
+.col-consumed { width: 165px; }
 .col-duration { width: 84px; }
 .col-status { width: 98px; }
 .col-ip,
 .col-apip { width: 130px; }
-.col-mac { width: 140px; }
+.col-mac { width: 150px; }
 .col-ssid { width: 130px; }
 .col-vlan { width: 80px; }
 
 @media (max-width: 1024px) {
   .admin-filters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .filter-field,
+  .filter-actions {
+    grid-column: span 1;
   }
 }
 
