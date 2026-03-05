@@ -105,6 +105,8 @@
                   <th class="col-ssid">SSID</th>
                   <th class="col-vlan">VLAN</th>
                   <th class="col-apip">AP IP</th>
+                  <th>Tipo</th>
+                  <th>Dispositivo</th>
                 </tr>
               </thead>
               <tbody>
@@ -123,6 +125,8 @@
                     <td class="truncate" title="<%= session.ssid || '-' %>"><%= session.ssid || '-' %></td>
                     <td><%= session.vlan || '-' %></td>
                     <td class="truncate" title="<%= session.apip || '-' %>"><%= session.apip || '-' %></td>
+                    <td><%= session.device_type || '-' %></td>
+                    <td class="truncate" title="<%= session.device_name || '-' %>"><%= session.device_name || '-' %></td>
                   </tr>
                 <% }) %>
               </tbody>
