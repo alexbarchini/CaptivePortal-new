@@ -205,6 +205,23 @@ function formatDurationSince(value) {
   return `${hours} hora${hours === 1 ? '' : 's'} e ${minutes} minuto${minutes === 1 ? '' : 's'}`;
 }
 
+function formatDurationHms(secondsValue) {
+  const totalSeconds = Number(secondsValue);
+  if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return '-';
+  const seconds = Math.floor(totalSeconds % 60);
+  const minutes = Math.floor((totalSeconds / 60) % 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  return [hours, minutes, seconds].map((part) => String(part).padStart(2, '0')).join(':');
+}
+
+function parseDatetimeLocal(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
 function normalizeClientIp(ip = '') {
   if (!ip) return '';
   const value = String(ip).trim();
@@ -515,65 +532,98 @@ app.get('/admin', allowCidrs, requireAdminSession, (req, res) => {
 
 app.get('/admin/lookup', allowCidrs, requireAdminSession, async (req, res) => {
   const cpfNormalized = cleanDigits(String(req.query.cpf || ''));
-  if (cpfNormalized.length !== 11) {
+  const nameQuery = String(req.query.name || '').trim();
+  const fromRaw = String(req.query.from || '').trim();
+  const toRaw = String(req.query.to || '').trim();
+  const offsetRaw = Number.parseInt(String(req.query.offset || '0'), 10);
+  const offset = Number.isInteger(offsetRaw) && offsetRaw > 0 ? offsetRaw : 0;
+  const fromIso = parseDatetimeLocal(fromRaw);
+  const toIso = parseDatetimeLocal(toRaw);
+
+  if (cpfNormalized && cpfNormalized.length !== 11) {
     return res.status(400).render('admin_lookup', {
-      title: 'Consulta por CPF',
+      title: 'Consulta administrativa',
       adminUser: req.adminSession.user,
-      cpf: cpfNormalized,
+      filters: { cpf: cpfNormalized, name: nameQuery, from: fromRaw, to: toRaw },
       error: 'CPF inválido para consulta.',
-      user: null,
-      sessions: []
+      sessions: [],
+      pagination: { limit: 50, offset, hasNextPage: false, nextOffset: offset + 50 }
     });
   }
 
-  const userResult = await pool.query(
-    `SELECT id, nome, email, phone_e164, cpf_formatado, cpf_normalizado
-     FROM users
-     WHERE cpf_normalizado = $1`,
-    [cpfNormalized]
-  );
-
-  const user = userResult.rows[0] || null;
-  let sessions = [];
-
-  if (user) {
-    const sessionsResult = await pool.query(
-      `SELECT id AS lsid,
-              created_at,
-              authorized_at,
-              consumed_at,
-              uip,
-              client_mac,
-              ssid,
-              vlan,
-              apip,
-              COALESCE(consumed_at, NOW()) - COALESCE(authorized_at, created_at) AS duration
-       FROM login_sessions
-       WHERE user_id = $1
-       ORDER BY created_at DESC
-       LIMIT 50`,
-      [user.id]
-    );
-
-    sessions = sessionsResult.rows.map((session) => ({
-      ...session,
-      status: !session.authorized_at ? 'OPEN' : (session.consumed_at ? 'CLOSED' : 'AUTHORIZED')
-    }));
+  if ((fromRaw && !fromIso) || (toRaw && !toIso)) {
+    return res.status(400).render('admin_lookup', {
+      title: 'Consulta administrativa',
+      adminUser: req.adminSession.user,
+      filters: { cpf: cpfNormalized, name: nameQuery, from: fromRaw, to: toRaw },
+      error: 'Intervalo de data/hora inválido.',
+      sessions: [],
+      pagination: { limit: 50, offset, hasNextPage: false, nextOffset: offset + 50 }
+    });
   }
 
+  const filters = [];
+  const values = [];
+  const pushFilter = (sql, value) => {
+    values.push(value);
+    filters.push(sql.replace('?', `$${values.length}`));
+  };
+
+  if (cpfNormalized) pushFilter('u.cpf_normalizado = ?', cpfNormalized);
+  if (nameQuery) pushFilter('u.nome ILIKE ?', `%${nameQuery}%`);
+  if (fromIso) pushFilter('ls.created_at >= ?', fromIso);
+  if (toIso) pushFilter('ls.created_at <= ?', toIso);
+
+  values.push(51, offset);
+  const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
+  const sessionsResult = await pool.query(
+    `SELECT ls.id AS lsid,
+            ls.created_at,
+            ls.authorized_at,
+            ls.consumed_at,
+            ls.uip,
+            ls.client_mac,
+            ls.ssid,
+            ls.vlan,
+            ls.apip,
+            u.nome,
+            u.cpf_formatado,
+            u.cpf_normalizado,
+            EXTRACT(EPOCH FROM (COALESCE(ls.consumed_at, NOW()) - COALESCE(ls.authorized_at, ls.created_at)))::int AS duration_seconds
+     FROM login_sessions ls
+     JOIN users u ON u.id = ls.user_id
+     ${whereClause}
+     ORDER BY ls.created_at DESC
+     LIMIT $${values.length - 1}
+     OFFSET $${values.length}`,
+    values
+  );
+
+  const hasNextPage = sessionsResult.rows.length > 50;
+  const sessions = sessionsResult.rows.slice(0, 50).map((session) => ({
+    ...session,
+    status: !session.authorized_at ? 'OPEN' : (session.consumed_at ? 'CLOSED' : 'AUTHORIZED'),
+    duration_hms: formatDurationHms(session.duration_seconds)
+  }));
+
   logInfo('admin_lookup', {
-    cpf_normalizado: cpfNormalized,
+    cpf_normalizado: cpfNormalized || null,
+    name_filter: nameQuery || null,
+    from_filter: fromIso,
+    to_filter: toIso,
+    offset,
+    result_count: sessions.length,
     admin_user: req.adminSession.user,
     request_ip: normalizeClientIp(req.ip)
   });
 
   return res.render('admin_lookup', {
-    title: 'Consulta por CPF',
+    title: 'Consulta administrativa',
     adminUser: req.adminSession.user,
-    cpf: cpfNormalized,
+    filters: { cpf: cpfNormalized, name: nameQuery, from: fromRaw, to: toRaw },
     error: null,
-    user,
-    sessions
+    sessions,
+    pagination: { limit: 50, offset, hasNextPage, nextOffset: offset + 50 }
   });
 });
 
@@ -990,7 +1040,14 @@ async function verifySmsHandler(req, res) {
     await pool.query(`INSERT INTO auth_events (user_id, login_session_id, event_type, status, detail) VALUES ($1, $2, 'sms_otp_login', $3, $4::jsonb)`, [session.user_id, session.id, nbiResult.success ? 'success' : 'failed', JSON.stringify({ mode: nbiResult.mode, request_id: nbiResult.requestId || null })]);
 
     if (!nbiResult.success) {
-      logInfo('authorize_flow_failed', { lsid: session.id, user_id: session.user_id, reason: 'nbi_failed', request_id: nbiResult.requestId || null });
+      logInfo('authorize_flow_failed', {
+        lsid: session.id,
+        user_id: session.user_id,
+        reason: 'nbi_failed',
+        request_id: nbiResult.requestId || null,
+        response_code: String(nbiResult.detail?.ResponseCode || ''),
+        reply_message: String(nbiResult.detail?.ReplyMessage || '')
+      });
       throw new AuthFlowError('NBI falhou.', `Falha na autorização do acesso no SmartZone. request_id=${nbiResult.requestId || 'n/a'}`, 401, 'nbi_failed');
     }
 
