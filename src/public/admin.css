@@ -172,7 +172,8 @@
   font-weight: 700;
 }
 
-.status-open { background: #fff3cd; color: #6a4b00; }
+.status-pending { background: #fde68a; color: #7c2d12; }
+.status-open { background: #d1fae5; color: #065f46; }
 .status-authorized { background: #d1fae5; color: #065f46; }
 .status-closed { background: #e5e7eb; color: #374151; }
 

@@ -506,7 +506,7 @@ function normalizeClientIp(ip = '') {
   return value;
 }
 
-const ADMIN_STATUS_VALUES = ['open', 'closed'];
+const ADMIN_STATUS_VALUES = ['pending', 'open', 'closed'];
 
 function normalizeAdminStatusFilter(rawStatus) {
   const statusList = Array.isArray(rawStatus) ? rawStatus : [rawStatus];
@@ -663,6 +663,18 @@ async function resolvePortalStatusFromWispr(ctx = {}) {
 
       const responseCode = String(nbiResult.detail?.ResponseCode || '');
       if (nbiResult.success && nbiResult.authorized) {
+        logInfo('portal_authorization_decision', {
+          decision: 'authorized',
+          source: 'nbi_status',
+          response_code: responseCode,
+          auth_state_key: nbiResult.authStateKey || null,
+          auth_state_value: nbiResult.authStateValue || null,
+          unconfirmed: Boolean(nbiResult.unconfirmed),
+          authorization_reason: nbiResult.authorizationReason || null,
+          reply_message: String(nbiResult.detail?.ReplyMessage || ''),
+          ue_ip: normalizedIp,
+          ue_mac: maskMac(normalizedMac)
+        });
         return { authorized: true, source: 'nbi_status', responseCode, session: dbSession };
       }
 
@@ -734,7 +746,7 @@ async function createPortalSession(req, params) {
       `INSERT INTO login_sessions (
         id, ctx_json, nbi_ip, uip, client_mac, proxy, ssid, sip, dn, wlan_name, url, apip, vlan, expires_at, device_type, device_name, user_agent, status
       ) VALUES (
-        $1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + ($14 || ' seconds')::interval, $15, $16, $17, 'OPEN'
+        $1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + ($14 || ' seconds')::interval, $15, $16, $17, 'PENDING'
       )`,
       [
         lsid,
@@ -1094,7 +1106,7 @@ app.get('/admin/sessions', async (req, res) => {
   const hasNextPage = sessionsResult.rows.length > 50;
   const sessions = sessionsResult.rows.slice(0, 50).map((session) => ({
     ...session,
-    status: session.status || (session.consumed_at ? 'CLOSED' : 'OPEN'),
+    status: session.status || (session.consumed_at ? 'CLOSED' : (session.authorized_at ? 'OPEN' : 'PENDING')),
     duration_hms: formatDurationHms(session.duration_seconds),
     created_at_label: formatDateTime(session.created_at),
     authorized_at_label: formatDateTime(session.authorized_at),
@@ -1653,7 +1665,8 @@ async function verifySmsHandler(req, res) {
     await enforceMaxOpenSessions(session.user_id, session.id, 5);
     await pool.query(
       `UPDATE login_sessions
-       SET authorized_at = COALESCE(authorized_at, NOW()),
+       SET status = 'OPEN',
+           authorized_at = COALESCE(authorized_at, NOW()),
            sz_nbi_ip = $2,
            last_sz_nbi_ip = COALESCE(sz_nbi_ip, $2),
            device_type = $3,
