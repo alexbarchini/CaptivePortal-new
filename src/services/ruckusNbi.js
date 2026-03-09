@@ -58,7 +58,6 @@ function isRetryableNbiError(error) {
     || code === 'ERR_NETWORK';
 }
 
-
 async function postJson(url, payload) {
   return axios.post(url, payload, {
     timeout: REQUEST_TIMEOUT_MS,
@@ -79,6 +78,19 @@ function maskMac(mac = '') {
   return `${compact.slice(0, 2)}:**:**:**:${compact.slice(-2)}`;
 }
 
+function macToControllerFormat(mac = '') {
+  const compact = String(mac || '').replace(/[^a-fA-F0-9]/g, '').toUpperCase();
+  if (!/^[A-F0-9]{12}$/.test(compact)) return String(mac || '');
+  return compact.match(/.{1,2}/g).join(':');
+}
+
+function sanitizePayloadForLog(payload = {}) {
+  const copy = { ...(payload || {}) };
+  if (copy.RequestPassword) copy.RequestPassword = '***';
+  if (copy['UE-Password']) copy['UE-Password'] = '***';
+  return copy;
+}
+
 function truncateBody(value) {
   const raw = typeof value === 'string' ? value : JSON.stringify(value || {});
   if (Buffer.byteLength(raw, 'utf8') <= MAX_BODY_LOG_BYTES) return raw;
@@ -94,14 +106,83 @@ function summarizeBody(data) {
   };
 }
 
+function extractControllerAuthState(detail = {}) {
+  const authKeys = ['AuthState', 'AuthorizationStatus', 'AuthStatus', 'UserState', 'UserStatus', 'ClientState', 'ClientStatus', 'SessionStatus', 'Status'];
+  for (const key of authKeys) {
+    if (detail[key] !== undefined && detail[key] !== null && String(detail[key]).trim()) {
+      return { key, value: String(detail[key]).trim() };
+    }
+  }
+
+  const reply = String(detail?.ReplyMessage || '').trim();
+  if (reply) return { key: 'ReplyMessage', value: reply };
+  return { key: null, value: '' };
+}
+
+function interpretControllerAuthorization(detail = {}) {
+  const code = responseCode(detail);
+  const authState = extractControllerAuthState(detail);
+  const normalized = String(authState.value || '').toLowerCase();
+
+  const explicitlyAuthorized = /authorized|authorize|online|logged\s*in|authenticated|login\s*succeeded/.test(normalized)
+    && !/unauthorized|not\s+authorized|failed|denied|reject/.test(normalized);
+  const explicitlyUnauthorized = /unauthorized|not\s+authorized|denied|reject|failed|offline/.test(normalized);
+
+  if (explicitlyAuthorized) {
+    return {
+      authorized: true,
+      unconfirmed: false,
+      reason: 'explicit_authorized_state',
+      responseCode: code,
+      authStateKey: authState.key,
+      authStateValue: authState.value
+    };
+  }
+
+  if (explicitlyUnauthorized) {
+    return {
+      authorized: false,
+      unconfirmed: false,
+      reason: 'explicit_unauthorized_state',
+      responseCode: code,
+      authStateKey: authState.key,
+      authStateValue: authState.value
+    };
+  }
+
+  return {
+    authorized: false,
+    unconfirmed: true,
+    reason: 'unconfirmed_controller_state',
+    responseCode: code,
+    authStateKey: authState.key,
+    authStateValue: authState.value
+  };
+}
+
+function logStatusInterpretation({ requestId, endpoint, interpretation }) {
+  logInfo('nbi_status_authorization_interpreted', {
+    request_id: requestId,
+    endpoint,
+    response_code: interpretation.responseCode,
+    auth_state_key: interpretation.authStateKey,
+    auth_state_value: interpretation.authStateValue,
+    interpreted_authorized: interpretation.authorized,
+    interpretation_unconfirmed: interpretation.unconfirmed,
+    interpretation_reason: interpretation.reason
+  });
+}
+
 async function postWithFallback({ nbiIP, payload, requestType, requestId, ueIp, ueMac, ueUsername, proxy }) {
   let lastError = null;
   for (const endpoint of getEndpoints(nbiIP)) {
     logInfo('nbi_request_prepared', {
       request_id: requestId,
-      nbi_ip: nbiIP,
+      host_selected: nbiIP,
       endpoint,
+      method: 'POST',
       request_type: requestType,
+      payload: sanitizePayloadForLog(payload),
       ue_ip: ueIp,
       ue_mac: maskMac(ueMac),
       ue_username: ueUsername,
@@ -110,7 +191,6 @@ async function postWithFallback({ nbiIP, payload, requestType, requestId, ueIp, 
     });
 
     try {
-      logInfo('nbi_http_request_sent', { request_id: requestId, timestamp: new Date().toISOString() });
       const response = await postJson(endpoint, payload);
       const responseData = response?.data || {};
       const selectedHeaders = {
@@ -121,6 +201,8 @@ async function postWithFallback({ nbiIP, payload, requestType, requestId, ueIp, 
       logInfo('nbi_http_response', NBI_DEBUG
         ? {
             request_id: requestId,
+            endpoint,
+            method: 'POST',
             http_status: response.status,
             headers: selectedHeaders,
             body: truncateBody(responseData),
@@ -128,8 +210,11 @@ async function postWithFallback({ nbiIP, payload, requestType, requestId, ueIp, 
           }
         : {
             request_id: requestId,
+            endpoint,
+            method: 'POST',
             http_status: response.status,
-            response_code: String(responseData?.ResponseCode ?? '')
+            response_code: String(responseData?.ResponseCode ?? ''),
+            raw_body: truncateBody(responseData)
           });
 
       return { response: responseData, endpoint, httpStatus: response.status };
@@ -138,6 +223,8 @@ async function postWithFallback({ nbiIP, payload, requestType, requestId, ueIp, 
       logError('nbi_http_error', NBI_DEBUG
         ? {
             request_id: requestId,
+            endpoint,
+            method: 'POST',
             code: error?.code || null,
             message: error?.message || 'Erro desconhecido no NBI.',
             stack: error?.stack || null,
@@ -149,6 +236,8 @@ async function postWithFallback({ nbiIP, payload, requestType, requestId, ueIp, 
           }
         : {
             request_id: requestId,
+            endpoint,
+            method: 'POST',
             code: error?.code || null,
             message: error?.message || 'Erro desconhecido no NBI.'
           });
@@ -159,30 +248,22 @@ async function postWithFallback({ nbiIP, payload, requestType, requestId, ueIp, 
 
 async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword }) {
   if (process.env.NBI_MOCK === 'true') {
-    return { success: true, mode: 'mock', detail: { ReplyMessage: 'NBI mock habilitado.' } };
+    return { success: true, authorized: true, unconfirmed: false, mode: 'mock', detail: { ReplyMessage: 'NBI mock habilitado.' } };
   }
 
   const requestId = crypto.randomUUID();
+  const ueMacController = macToControllerFormat(ueMac);
   const loginPayload = {
     ...basePayload(),
     RequestType: 'LoginAsync',
     'UE-IP': ueIp,
-    'UE-MAC': ueMac,
+    'UE-MAC': ueMacController,
     'UE-Proxy': proxy || '0',
     'UE-Username': ueUsername,
     'UE-Password': uePassword
   };
 
-  const loginResult = await postWithFallback({
-    nbiIP,
-    payload: loginPayload,
-    requestType: 'LoginAsync',
-    requestId,
-    ueIp,
-    ueMac,
-    ueUsername,
-    proxy
-  });
+  const loginResult = await postWithFallback({ nbiIP, payload: loginPayload, requestType: 'LoginAsync', requestId, ueIp, ueMac: ueMacController, ueUsername, proxy });
   const loginResponse = loginResult.response;
 
   logInfo('nbi_login_async_result', {
@@ -195,20 +276,7 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
     transaction_id: loginResponse?.TransactionId || null
   });
 
-  if (isSuccess(loginResponse)) {
-    logInfo('nbi_login_success', {
-      request_id: requestId,
-      nbi_ip: nbiIP,
-      endpoint: loginResult.endpoint,
-      response_code: responseCode(loginResponse),
-      reply_message: String(loginResponse?.ReplyMessage ?? ''),
-      session_id: loginResponse?.SessionId || null,
-      transaction_id: loginResponse?.TransactionId || null
-    });
-    return { success: true, mode: 'login', detail: loginResponse, requestId };
-  }
-
-  if (!isPending(loginResponse) || isFailed(loginResponse)) {
+  if (!isSuccess(loginResponse) && (!isPending(loginResponse) || isFailed(loginResponse))) {
     logInfo('nbi_login_failed', {
       request_id: requestId,
       nbi_ip: nbiIP,
@@ -218,7 +286,7 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
       session_id: loginResponse?.SessionId || null,
       transaction_id: loginResponse?.TransactionId || null
     });
-    return { success: false, mode: 'login', detail: loginResponse, requestId };
+    return { success: false, authorized: false, unconfirmed: false, mode: 'login', detail: loginResponse, requestId };
   }
 
   const startedAt = Date.now();
@@ -229,22 +297,13 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
       ...basePayload(),
       RequestType: 'Status',
       'UE-IP': ueIp,
-      'UE-MAC': ueMac,
+      'UE-MAC': ueMacController,
       'UE-Proxy': proxy || '0',
       'UE-Username': ueUsername,
       'UE-Password': uePassword
     };
 
-    const statusResult = await postWithFallback({
-      nbiIP,
-      payload: statusPayload,
-      requestType: 'Status',
-      requestId,
-      ueIp,
-      ueMac,
-      ueUsername,
-      proxy
-    });
+    const statusResult = await postWithFallback({ nbiIP, payload: statusPayload, requestType: 'Status', requestId, ueIp, ueMac: ueMacController, ueUsername, proxy });
     const statusResponse = statusResult.response;
 
     logInfo('nbi_status_poll', {
@@ -257,33 +316,29 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
       transaction_id: statusResponse?.TransactionId || null
     });
 
+    if (isPending(statusResponse)) continue;
+
+    const interpretation = interpretControllerAuthorization(statusResponse);
+    logStatusInterpretation({ requestId, endpoint: statusResult.endpoint, interpretation });
+
     if (isSuccess(statusResponse)) {
-      // Cenário validado: LoginAsync=202 e Status=201 ("Login succeeded") deve retornar success:true.
-      logInfo('nbi_login_success', {
-        request_id: requestId,
-        nbi_ip: nbiIP,
-        endpoint: statusResult.endpoint,
-        response_code: responseCode(statusResponse),
-        reply_message: String(statusResponse?.ReplyMessage ?? ''),
-        session_id: statusResponse?.SessionId || null,
-        transaction_id: statusResponse?.TransactionId || null
-      });
-      return { success: true, mode: 'status', detail: statusResponse, requestId };
-    } else if (isPending(statusResponse)) {
-      continue;
+      return {
+        success: true,
+        authorized: interpretation.authorized,
+        unconfirmed: interpretation.unconfirmed,
+        authorizationReason: interpretation.reason,
+        authStateKey: interpretation.authStateKey,
+        authStateValue: interpretation.authStateValue,
+        mode: 'status',
+        detail: statusResponse,
+        requestId
+      };
     }
 
-    logInfo('nbi_login_failed', {
-      request_id: requestId,
-      nbi_ip: nbiIP,
-      endpoint: statusResult.endpoint,
-      response_code: responseCode(statusResponse),
-      reply_message: String(statusResponse?.ReplyMessage || 'Resposta inválida no polling de status.'),
-      session_id: statusResponse?.SessionId || null,
-      transaction_id: statusResponse?.TransactionId || null
-    });
     return {
       success: false,
+      authorized: false,
+      unconfirmed: false,
       mode: 'status',
       detail: {
         ResponseCode: responseCode(statusResponse),
@@ -301,7 +356,7 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
     reply_message: timeoutDetail.ReplyMessage
   });
 
-  return { success: false, mode: 'timeout', detail: timeoutDetail, requestId };
+  return { success: false, authorized: false, unconfirmed: false, mode: 'timeout', detail: timeoutDetail, requestId };
 }
 
 async function disconnectAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername }) {
@@ -310,25 +365,17 @@ async function disconnectAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername }) {
   }
 
   const requestId = crypto.randomUUID();
+  const ueMacController = macToControllerFormat(ueMac);
   const disconnectPayload = {
     ...basePayload(),
     RequestType: 'Disconnect',
     'UE-IP': ueIp,
-    'UE-MAC': ueMac,
+    'UE-MAC': ueMacController,
     'UE-Proxy': proxy || '0',
     ...(ueUsername ? { 'UE-Username': ueUsername } : {})
   };
 
-  const disconnectResult = await postWithFallback({
-    nbiIP,
-    payload: disconnectPayload,
-    requestType: 'Disconnect',
-    requestId,
-    ueIp,
-    ueMac,
-    proxy,
-    ueUsername
-  });
+  const disconnectResult = await postWithFallback({ nbiIP, payload: disconnectPayload, requestType: 'Disconnect', requestId, ueIp, ueMac: ueMacController, proxy, ueUsername });
   const disconnectResponse = disconnectResult.response;
 
   logInfo('nbi_disconnect_result', {
@@ -352,32 +399,26 @@ async function statusAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword }
   if (process.env.NBI_MOCK === 'true') {
     return {
       success: true,
+      authorized: true,
+      unconfirmed: false,
       mode: 'mock',
       detail: { ResponseCode: '101', ReplyMessage: 'Client authorized (mock).' }
     };
   }
 
   const requestId = crypto.randomUUID();
+  const ueMacController = macToControllerFormat(ueMac);
   const statusPayload = {
     ...basePayload(),
     RequestType: 'Status',
     'UE-IP': ueIp,
-    'UE-MAC': ueMac,
+    'UE-MAC': ueMacController,
     'UE-Proxy': proxy || '0',
     ...(ueUsername ? { 'UE-Username': ueUsername } : {}),
     ...(uePassword ? { 'UE-Password': uePassword } : {})
   };
 
-  const statusResult = await postWithFallback({
-    nbiIP,
-    payload: statusPayload,
-    requestType: 'Status',
-    requestId,
-    ueIp,
-    ueMac,
-    ueUsername,
-    proxy
-  });
+  const statusResult = await postWithFallback({ nbiIP, payload: statusPayload, requestType: 'Status', requestId, ueIp, ueMac: ueMacController, ueUsername, proxy });
 
   const statusResponse = statusResult.response;
   logInfo('nbi_status_result', {
@@ -390,8 +431,16 @@ async function statusAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword }
     transaction_id: statusResponse?.TransactionId || null
   });
 
+  const interpretation = interpretControllerAuthorization(statusResponse);
+  logStatusInterpretation({ requestId, endpoint: statusResult.endpoint, interpretation });
+
   return {
     success: isSuccess(statusResponse),
+    authorized: interpretation.authorized,
+    unconfirmed: interpretation.unconfirmed,
+    authorizationReason: interpretation.reason,
+    authStateKey: interpretation.authStateKey,
+    authStateValue: interpretation.authStateValue,
     mode: 'status',
     detail: statusResponse,
     requestId
