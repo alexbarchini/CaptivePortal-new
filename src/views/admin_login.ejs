@@ -14,8 +14,11 @@
       <h2>Login administrativo</h2>
       <% if (error) { %><div class="alert error"><%= error %></div><% } %>
       <form method="post" action="/admin/login">
-        <label>Senha</label>
-        <input name="password" type="password" required />
+        <label for="username">Usuário</label>
+        <input id="username" name="username" type="text" value="<%= username || '' %>" autocomplete="username" required />
+
+        <label for="password">Senha</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
 
         <button type="submit">Entrar</button>
       </form>
