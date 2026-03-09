@@ -371,6 +371,11 @@ function normalizeMacIfPlain(mac = '') {
   if (!looksLikePlainMac(mac)) return String(mac || '');
   return String(mac || '').replace(/[^a-fA-F0-9]/g, '').toUpperCase();
 }
+function toMacColonFormat(mac = '') {
+  const normalized = normalizeMacIfPlain(mac);
+  if (!looksLikePlainMac(normalized)) return String(mac || '');
+  return normalized.match(/.{1,2}/g).join(':');
+}
 function resolveWisprParams(params = {}) {
   const userIp = params.uip || params['UE-IP'] || params.client_ip;
   const userMac = params.client_mac || params['UE-MAC'];
@@ -657,7 +662,7 @@ async function resolvePortalStatusFromWispr(ctx = {}) {
       const nbiResult = pick.result;
 
       const responseCode = String(nbiResult.detail?.ResponseCode || '');
-      if (nbiResult.success) {
+      if (nbiResult.success && nbiResult.authorized) {
         return { authorized: true, source: 'nbi_status', responseCode, session: dbSession };
       }
 
@@ -665,6 +670,9 @@ async function resolvePortalStatusFromWispr(ctx = {}) {
         decision: 'unauthorized',
         source: 'nbi_status',
         response_code: responseCode,
+        auth_state_key: nbiResult.authStateKey || null,
+        auth_state_value: nbiResult.authStateValue || null,
+        unconfirmed: Boolean(nbiResult.unconfirmed),
         reply_message: String(nbiResult.detail?.ReplyMessage || ''),
         ue_ip: normalizedIp,
         ue_mac: maskMac(normalizedMac)
@@ -677,10 +685,6 @@ async function resolvePortalStatusFromWispr(ctx = {}) {
         error
       });
     }
-  }
-
-  if (dbSession) {
-    return { authorized: true, source: 'db_fallback', responseCode: null, session: dbSession };
   }
 
   return { authorized: false, reason: 'not_authorized' };
@@ -901,6 +905,9 @@ async function authorizeViaNbi(ctx, user) {
     lsid: user.sessionId,
     user_id: user.userId,
     user_ip: userIp,
+    user_mac_received: userMac,
+    user_mac_normalized: normalizeMacIfPlain(userMac),
+    user_mac_controller_format: toMacColonFormat(userMac),
     user_mac: maskMac(userMac),
     proxy,
     smartzone_host_resolved: hostResolution.host,
@@ -1600,6 +1607,29 @@ async function verifySmsHandler(req, res) {
       throw new AuthFlowError('NBI falhou.', `Falha na autorização do acesso no SmartZone. request_id=${nbiResult.requestId || 'n/a'}`, 401, 'nbi_failed');
     }
 
+    if (!nbiResult.authorized) {
+      const eventType = nbiResult.unconfirmed ? 'controller_authorization_unconfirmed' : 'controller_authorization_failed';
+      logInfo(eventType, {
+        lsid: session.id,
+        user_id: session.user_id,
+        request_id: nbiResult.requestId || null,
+        response_code: String(nbiResult.detail?.ResponseCode || ''),
+        reply_message: String(nbiResult.detail?.ReplyMessage || ''),
+        auth_state_key: nbiResult.authStateKey || null,
+        auth_state_value: nbiResult.authStateValue || null,
+        authorization_reason: nbiResult.authorizationReason || null,
+        selected_host: nbiResult.nbiIP || null,
+        selected_source: nbiResult.selectedSource || 'nbi_authorize_result'
+      });
+
+      throw new AuthFlowError(
+        'Controladora não confirmou autorização.',
+        `Falha na autorização do acesso no SmartZone (sem confirmação explícita). request_id=${nbiResult.requestId || 'n/a'}`,
+        401,
+        nbiResult.unconfirmed ? 'controller_authorization_unconfirmed' : 'controller_authorization_failed'
+      );
+    }
+
     const selectedHostValidation = await ensureSelectedSmartZoneHostIsValid(nbiResult.nbiIP || '');
     if (!selectedHostValidation.valid) {
       logInfo('authorize_flow_failed', {
@@ -1644,10 +1674,13 @@ async function verifySmsHandler(req, res) {
     );
     res.cookie('portal_session', String(session.user_id), { maxAge: SESSION_MAX_AGE_MS, httpOnly: true, sameSite: 'lax' });
 
-    logInfo('authorize_flow_success', {
+    logInfo('controller_authorization_confirmed', {
       lsid: session.id,
       user_id: session.user_id,
       request_id: nbiResult.requestId || null,
+      auth_state_key: nbiResult.authStateKey || null,
+      auth_state_value: nbiResult.authStateValue || null,
+      authorization_reason: nbiResult.authorizationReason || null,
       nbi_ip: selectedHostValidation.normalizedHost || null,
       selected_host: selectedHostValidation.normalizedHost,
       selected_source: nbiResult.selectedSource || 'nbi_authorize_result',
@@ -1660,7 +1693,7 @@ async function verifySmsHandler(req, res) {
     logError('otp_verify_error', { lsid, error });
 
     const isMissingWispr = error instanceof AuthFlowError && error.reason === 'missing_wispr_params';
-    const isNbiFailed = error instanceof AuthFlowError && ['nbi_failed', 'invalid_selected_host'].includes(error.reason);
+    const isNbiFailed = error instanceof AuthFlowError && ['nbi_failed', 'invalid_selected_host', 'controller_authorization_failed', 'controller_authorization_unconfirmed'].includes(error.reason);
     const isSessionExpired = error instanceof AuthFlowError && (error.statusCode === 400) && error.userMessage;
     const errorMessage = isMissingWispr
       ? 'Acesse o portal a partir do Wi-Fi visitante (redirect captive).'
