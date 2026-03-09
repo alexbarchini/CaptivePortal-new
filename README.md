@@ -39,7 +39,8 @@ docker compose up --build
 ```
 
 Serviços:
-- App: `http://localhost:3000`
+- Nginx (proxy): `http://localhost`
+- App: interno na rede Docker (`app:3000`)
 - Postgres: **não exposto externamente** (acesso apenas na rede interna Docker via host `postgres:5432`)
 - FreeRADIUS (opcional): UDP `1812/1813`
 
@@ -70,6 +71,7 @@ Copie `.env.example` para `.env` e ajuste:
 - `SMS_API_USERNAME`, `SMS_API_PASSWORD`, `SMS_API_COD_CARTEIRA`, `SMS_API_COD_FORNECEDOR`: credenciais da ClasseA 360.
 
 - `ADMIN_ALLOWED_CIDRS`: lista de CIDRs permitidos no `/admin/*` (default: `10.9.62.0/23`).
+- Nginx também bloqueia `/admin` para permitir apenas `10.9.62.0/23` (config em `docker/nginx/default.conf`).
 - `ADMIN_USER`: usuário administrador do painel.
 - `ADMIN_PASSWORD_HASH`: hash Argon2 da senha do admin.
 - `ADMIN_SESSION_TTL_HOURS`: duração da sessão administrativa em horas (default: `8`).
