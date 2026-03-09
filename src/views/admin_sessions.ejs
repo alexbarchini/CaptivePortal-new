@@ -48,6 +48,9 @@
         <div class="filter-field filter-status">
           <span class="filter-label">Status</span>
           <label class="checkbox-inline">
+            <input type="checkbox" name="status" value="pending" <%= (filters?.status || []).includes('pending') ? 'checked' : '' %> /> PENDING
+          </label>
+          <label class="checkbox-inline">
             <input type="checkbox" name="status" value="open" <%= (filters?.status || []).includes('open') ? 'checked' : '' %> /> OPEN
           </label>
           <label class="checkbox-inline">

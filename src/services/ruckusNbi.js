@@ -36,6 +36,11 @@ function isSuccess(data) {
   return code === '101' || code === '201';
 }
 
+function isApiCallAccepted(data) {
+  const code = responseCode(data);
+  return code === '101' || code === '201' || code === '202';
+}
+
 function isPending(data) {
   return responseCode(data) === '202';
 }
@@ -124,7 +129,7 @@ function interpretControllerAuthorization(detail = {}) {
   const authState = extractControllerAuthState(detail);
   const normalized = String(authState.value || '').toLowerCase();
 
-  const explicitlyAuthorized = /authorized|authorize|online|logged\s*in|authenticated|login\s*succeeded/.test(normalized)
+  const explicitlyAuthorized = /\bauthorized\b|\bonline\b|\blogged\s*in\b|\bauthenticated\b|\blogin\s*succeeded\b/.test(normalized)
     && !/unauthorized|not\s+authorized|failed|denied|reject/.test(normalized);
   const explicitlyUnauthorized = /unauthorized|not\s+authorized|denied|reject|failed|offline/.test(normalized);
 
@@ -248,7 +253,20 @@ async function postWithFallback({ nbiIP, payload, requestType, requestId, ueIp, 
 
 async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword }) {
   if (process.env.NBI_MOCK === 'true') {
-    return { success: true, authorized: true, unconfirmed: false, mode: 'mock', detail: { ReplyMessage: 'NBI mock habilitado.' } };
+    const detail = { ResponseCode: '101', ReplyMessage: 'Login accepted (mock).', AuthState: 'UNAUTHORIZED' };
+    const interpretation = interpretControllerAuthorization(detail);
+    logStatusInterpretation({ requestId: 'nbi-mock', endpoint: 'mock://nbi/login', interpretation });
+    return {
+      success: true,
+      authorized: interpretation.authorized,
+      unconfirmed: interpretation.unconfirmed,
+      authorizationReason: interpretation.reason,
+      authStateKey: interpretation.authStateKey,
+      authStateValue: interpretation.authStateValue,
+      mode: 'mock',
+      detail,
+      requestId: 'nbi-mock'
+    };
   }
 
   const requestId = crypto.randomUUID();
@@ -276,7 +294,7 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
     transaction_id: loginResponse?.TransactionId || null
   });
 
-  if (!isSuccess(loginResponse) && (!isPending(loginResponse) || isFailed(loginResponse))) {
+  if (!isApiCallAccepted(loginResponse) || isFailed(loginResponse)) {
     logInfo('nbi_login_failed', {
       request_id: requestId,
       nbi_ip: nbiIP,
@@ -311,6 +329,7 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
       nbi_ip: nbiIP,
       endpoint: statusResult.endpoint,
       response_code: responseCode(statusResponse),
+      http_call_accepted: isApiCallAccepted(statusResponse),
       reply_message: String(statusResponse?.ReplyMessage ?? ''),
       session_id: statusResponse?.SessionId || null,
       transaction_id: statusResponse?.TransactionId || null
@@ -321,7 +340,7 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
     const interpretation = interpretControllerAuthorization(statusResponse);
     logStatusInterpretation({ requestId, endpoint: statusResult.endpoint, interpretation });
 
-    if (isSuccess(statusResponse)) {
+    if (isApiCallAccepted(statusResponse)) {
       return {
         success: true,
         authorized: interpretation.authorized,
@@ -335,15 +354,29 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
       };
     }
 
+    const failedDetail = {
+      ResponseCode: responseCode(statusResponse),
+      ReplyMessage: String(statusResponse?.ReplyMessage || 'Resposta inválida no polling de status.')
+    };
+
+    logInfo('nbi_status_poll_failed', {
+      request_id: requestId,
+      nbi_ip: nbiIP,
+      endpoint: statusResult.endpoint,
+      response_code: failedDetail.ResponseCode,
+      reply_message: failedDetail.ReplyMessage,
+      controller_decision_fields: {
+        auth_state_key: interpretation.authStateKey,
+        auth_state_value: interpretation.authStateValue
+      }
+    });
+
     return {
       success: false,
       authorized: false,
       unconfirmed: false,
       mode: 'status',
-      detail: {
-        ResponseCode: responseCode(statusResponse),
-        ReplyMessage: String(statusResponse?.ReplyMessage || 'Resposta inválida no polling de status.')
-      },
+      detail: failedDetail,
       requestId
     };
   }
@@ -397,12 +430,18 @@ async function disconnectAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername }) {
 
 async function statusAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword }) {
   if (process.env.NBI_MOCK === 'true') {
+    const detail = { ResponseCode: '101', ReplyMessage: 'Status checked (mock).', AuthState: 'UNAUTHORIZED' };
+    const interpretation = interpretControllerAuthorization(detail);
+    logStatusInterpretation({ requestId: 'nbi-mock', endpoint: 'mock://nbi/status', interpretation });
     return {
       success: true,
-      authorized: true,
-      unconfirmed: false,
+      authorized: interpretation.authorized,
+      unconfirmed: interpretation.unconfirmed,
+      authorizationReason: interpretation.reason,
+      authStateKey: interpretation.authStateKey,
+      authStateValue: interpretation.authStateValue,
       mode: 'mock',
-      detail: { ResponseCode: '101', ReplyMessage: 'Client authorized (mock).' }
+      detail
     };
   }
 
@@ -435,7 +474,7 @@ async function statusAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword }
   logStatusInterpretation({ requestId, endpoint: statusResult.endpoint, interpretation });
 
   return {
-    success: isSuccess(statusResponse),
+    success: isApiCallAccepted(statusResponse),
     authorized: interpretation.authorized,
     unconfirmed: interpretation.unconfirmed,
     authorizationReason: interpretation.reason,
