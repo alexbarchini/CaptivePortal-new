@@ -37,7 +37,18 @@ const ADMIN_SESSION_COOKIE_NAME = 'admin_session';
 const ADMIN_SESSION_TTL_MS = Number(process.env.ADMIN_SESSION_TTL_MINUTES || 30) * 60 * 1000;
 const ADMIN_ALLOWED_CIDRS = String(process.env.ADMIN_ALLOWED_CIDRS || '10.9.62.0/23').split(',').map((item) => item.trim()).filter(Boolean);
 const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_PASSWORD_HASH || 'admin-session-secret';
-const ADMIN_USERNAME = String(process.env.ADMIN_USERNAME || 'admin');
+const ADMIN_USERNAME = String(process.env.ADMIN_USERNAME || process.env.ADMIN_USER || 'admin').trim();
+
+function normalizeAdminPasswordHash(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  if ((raw.startsWith("'") && raw.endsWith("'")) || (raw.startsWith('\"') && raw.endsWith('\"'))) {
+    return raw.slice(1, -1);
+  }
+
+  return raw;
+}
 const smsProvider = buildSmsProvider();
 const DISPLAY_TIME_ZONE = 'America/Sao_Paulo';
 const SMARTZONE_HOSTS = [
@@ -800,7 +811,7 @@ app.get('/admin/login', (req, res) => {
 });
 
 app.post('/admin/login', adminLoginLimiter, async (req, res) => {
-  const adminPasswordHash = String(process.env.ADMIN_PASSWORD_HASH || '');
+  const adminPasswordHash = normalizeAdminPasswordHash(process.env.ADMIN_PASSWORD_HASH);
   const providedUsername = String(req.body.username || '').trim();
   const providedPassword = String(req.body.password || '');
   const requestIp = getRequestClientIp(req);
