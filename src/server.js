@@ -40,21 +40,25 @@ const ADMIN_ALLOWED_CIDRS = String(process.env.ADMIN_ALLOWED_CIDRS || '10.9.62.0
 const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_PASSWORD_HASH || 'admin-session-secret';
 const smsProvider = buildSmsProvider();
 const DISPLAY_TIME_ZONE = 'America/Sao_Paulo';
-const SMARTZONE_HOSTS = [
-  ...new Set(
-    String(process.env.SZ_MANAGEMENT_IPS || '')
+function parseSmartZoneManagementIps(rawValue = '') {
+  return [...new Set(
+    String(rawValue || '')
       .split(',')
       .map((item) => String(item || '').trim())
       .filter(Boolean)
-  )
-];
-if (process.env.SZ_MANAGEMENT_IP && !SMARTZONE_HOSTS.includes(process.env.SZ_MANAGEMENT_IP)) {
-  SMARTZONE_HOSTS.push(process.env.SZ_MANAGEMENT_IP);
+  )];
+}
+
+const SMARTZONE_HOSTS = parseSmartZoneManagementIps(process.env.SZ_MANAGEMENT_IPS);
+
+for (const legacyHost of parseSmartZoneManagementIps(process.env.SZ_MANAGEMENT_IP || '')) {
+  if (!SMARTZONE_HOSTS.includes(legacyHost)) SMARTZONE_HOSTS.push(legacyHost);
 }
 
 function normalizeSmartZoneHostCandidate(value = '') {
   const raw = String(value || '').trim();
   if (!raw) return '';
+  if (raw.includes(',')) return '';
 
   const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
   try {
@@ -158,6 +162,19 @@ async function resolveSmartZoneHost(ctx = {}) {
   };
 }
 
+
+async function ensureSelectedSmartZoneHostIsValid(host = '') {
+  const normalizedHost = normalizeSmartZoneHostCandidate(host);
+  if (!normalizedHost) {
+    return { valid: false, reason: 'empty_or_malformed_selected_host', normalizedHost };
+  }
+  const validation = await validateSmartZoneHostAgainstAllowlist(normalizedHost);
+  if (!validation.allowed) {
+    return { valid: false, reason: validation.reason, normalizedHost };
+  }
+  return { valid: true, reason: validation.reason, normalizedHost };
+}
+
 async function pickSmartZoneHost(ctx = {}, action = async () => null) {
   const hostResolution = await resolveSmartZoneHost(ctx);
   const rawNbiIp = String(ctx.nbiIP || '').trim();
@@ -192,14 +209,15 @@ async function pickSmartZoneHost(ctx = {}, action = async () => null) {
       const didFailover = index > 0;
       logInfo('smartzone_host_selected', {
         requested_nbi_ip: rawNbiIp || null,
-        resolved_source: hostResolution.source,
+        selected_source: hostResolution.source,
         resolved_host: hostResolution.host || null,
+        allowlist: SMARTZONE_ALLOWLIST,
         fallback_trail: hostResolution.fallbackTrail,
         selected_host: host,
         did_failover: didFailover,
         attempts: index + 1
       });
-      return { host, result, didFailover };
+      return { host, result, didFailover, source: hostResolution.source, fallbackTrail: hostResolution.fallbackTrail };
     } catch (error) {
       lastError = error;
       const shouldRetry = isRetryableNbiError(error) && index < hosts.length - 1;
@@ -749,6 +767,7 @@ async function createPortalSession(req, params) {
     params: sanitizeParams(ctx),
     smartzone_host_resolved: hostResolution.host || null,
     smartzone_host_source: hostResolution.source,
+    allowlist: SMARTZONE_ALLOWLIST,
     fallback_trail: hostResolution.fallbackTrail
   });
   return lsid;
@@ -886,6 +905,7 @@ async function authorizeViaNbi(ctx, user) {
     proxy,
     smartzone_host_resolved: hostResolution.host,
     smartzone_host_source: hostResolution.source,
+    allowlist: SMARTZONE_ALLOWLIST,
     fallback_trail: hostResolution.fallbackTrail
   });
 
@@ -901,6 +921,8 @@ async function authorizeViaNbi(ctx, user) {
   return {
     ...pick.result,
     nbiIP: pick.host,
+    selectedSource: pick.source,
+    fallbackTrail: pick.fallbackTrail,
     failoverUsed: pick.didFailover
   };
 }
@@ -1578,6 +1600,26 @@ async function verifySmsHandler(req, res) {
       throw new AuthFlowError('NBI falhou.', `Falha na autorização do acesso no SmartZone. request_id=${nbiResult.requestId || 'n/a'}`, 401, 'nbi_failed');
     }
 
+    const selectedHostValidation = await ensureSelectedSmartZoneHostIsValid(nbiResult.nbiIP || '');
+    if (!selectedHostValidation.valid) {
+      logInfo('authorize_flow_failed', {
+        lsid: session.id,
+        user_id: session.user_id,
+        reason: 'invalid_selected_host',
+        selected_host: nbiResult.nbiIP || null,
+        selected_source: nbiResult.selectedSource || 'nbi_authorize_result',
+        fallback_trail: nbiResult.fallbackTrail || [],
+        allowlist: SMARTZONE_ALLOWLIST,
+        validation_reason: selectedHostValidation.reason
+      });
+      throw new AuthFlowError(
+        'Host SmartZone retornado inválido.',
+        'Falha na autorização do acesso no SmartZone. Host inválido selecionado.',
+        401,
+        'invalid_selected_host'
+      );
+    }
+
     await enforceMaxOpenSessions(session.user_id, session.id, 5);
     await pool.query(
       `UPDATE login_sessions
@@ -1588,7 +1630,7 @@ async function verifySmsHandler(req, res) {
            device_name = COALESCE($4, device_name),
            user_agent = COALESCE(NULLIF($5, ''), user_agent)
        WHERE id = $1`,
-      [session.id, nbiResult.nbiIP || null, deviceType, deviceName, req.get('user-agent') || '']
+      [session.id, selectedHostValidation.normalizedHost || null, deviceType, deviceName, req.get('user-agent') || '']
     );
     await pool.query(
       `INSERT INTO portal_active_sessions (id, user_id, ue_ip, ue_mac, ssid, authorized_at, ended_at, last_seen_at, created_at)
@@ -1602,13 +1644,23 @@ async function verifySmsHandler(req, res) {
     );
     res.cookie('portal_session', String(session.user_id), { maxAge: SESSION_MAX_AGE_MS, httpOnly: true, sameSite: 'lax' });
 
-    logInfo('authorize_flow_success', { lsid: session.id, user_id: session.user_id, request_id: nbiResult.requestId || null, nbi_ip: nbiResult.nbiIP || null, failover_used: Boolean(nbiResult.failoverUsed) });
+    logInfo('authorize_flow_success', {
+      lsid: session.id,
+      user_id: session.user_id,
+      request_id: nbiResult.requestId || null,
+      nbi_ip: selectedHostValidation.normalizedHost || null,
+      selected_host: selectedHostValidation.normalizedHost,
+      selected_source: nbiResult.selectedSource || 'nbi_authorize_result',
+      fallback_trail: nbiResult.fallbackTrail || [],
+      allowlist: SMARTZONE_ALLOWLIST,
+      failover_used: Boolean(nbiResult.failoverUsed)
+    });
     return res.redirect(getOriginalUrl(ctx));
   } catch (error) {
     logError('otp_verify_error', { lsid, error });
 
     const isMissingWispr = error instanceof AuthFlowError && error.reason === 'missing_wispr_params';
-    const isNbiFailed = error instanceof AuthFlowError && error.reason === 'nbi_failed';
+    const isNbiFailed = error instanceof AuthFlowError && ['nbi_failed', 'invalid_selected_host'].includes(error.reason);
     const isSessionExpired = error instanceof AuthFlowError && (error.statusCode === 400) && error.userMessage;
     const errorMessage = isMissingWispr
       ? 'Acesse o portal a partir do Wi-Fi visitante (redirect captive).'
