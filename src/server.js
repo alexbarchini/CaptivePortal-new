@@ -1,6 +1,7 @@
 require('dotenv').config();
 const path = require('path');
 const crypto = require('crypto');
+const dns = require('dns').promises;
 const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -43,7 +44,7 @@ const SMARTZONE_HOSTS = [
   ...new Set(
     String(process.env.SZ_MANAGEMENT_IPS || '')
       .split(',')
-      .map((item) => item.trim())
+      .map((item) => String(item || '').trim())
       .filter(Boolean)
   )
 ];
@@ -51,25 +52,123 @@ if (process.env.SZ_MANAGEMENT_IP && !SMARTZONE_HOSTS.includes(process.env.SZ_MAN
   SMARTZONE_HOSTS.push(process.env.SZ_MANAGEMENT_IP);
 }
 
-function isAllowedSmartZoneHost(host = '') {
-  return Boolean(host) && SMARTZONE_HOSTS.includes(String(host).trim());
+function normalizeSmartZoneHostCandidate(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+  try {
+    const url = new URL(withScheme);
+    return String(url.hostname || '').trim().toLowerCase();
+  } catch (_) {
+    return raw.replace(/^https?:\/\//i, '').replace(/\/$/, '').trim().toLowerCase();
+  }
+}
+
+const SMARTZONE_ALLOWLIST = [...new Set(SMARTZONE_HOSTS.map((item) => normalizeSmartZoneHostCandidate(item)).filter(Boolean))];
+
+function isIpv4Address(host = '') {
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host);
+}
+
+async function resolveHostIps(host = '') {
+  const normalizedHost = normalizeSmartZoneHostCandidate(host);
+  if (!normalizedHost || isIpv4Address(normalizedHost)) return [normalizedHost].filter(Boolean);
+  try {
+    const records = await dns.lookup(normalizedHost, { all: true });
+    return [...new Set(records.map((record) => String(record.address || '').trim()).filter(Boolean))];
+  } catch (_) {
+    return [];
+  }
+}
+
+async function validateSmartZoneHostAgainstAllowlist(host = '') {
+  const normalizedHost = normalizeSmartZoneHostCandidate(host);
+  if (!normalizedHost) {
+    return { allowed: false, reason: 'empty_host', normalizedHost };
+  }
+
+  if (SMARTZONE_ALLOWLIST.includes(normalizedHost)) {
+    return { allowed: true, reason: 'exact_allowlist_match', normalizedHost };
+  }
+
+  const hostIps = await resolveHostIps(normalizedHost);
+  if (hostIps.length === 0) {
+    return { allowed: false, reason: 'host_not_resolvable_or_not_in_allowlist', normalizedHost };
+  }
+
+  for (const allowedEntry of SMARTZONE_ALLOWLIST) {
+    const allowedIps = await resolveHostIps(allowedEntry);
+    const hasIpMatch = allowedIps.some((ip) => hostIps.includes(ip));
+    if (hasIpMatch) {
+      return {
+        allowed: true,
+        reason: 'resolved_ip_allowlist_match',
+        normalizedHost,
+        matchedAllowlistEntry: allowedEntry
+      };
+    }
+  }
+
+  return { allowed: false, reason: 'resolved_ip_not_in_allowlist', normalizedHost };
 }
 
 function normalizeNbiIpCandidate(value = '') {
-  const candidate = String(value || '').trim();
-  if (!candidate) return '';
-  return isAllowedSmartZoneHost(candidate) ? candidate : '';
+  return normalizeSmartZoneHostCandidate(value);
+}
+
+async function resolveSmartZoneHost(ctx = {}) {
+  const normalizedFromEnv = SMARTZONE_ALLOWLIST[0] || '';
+  const legacyFallback = normalizeSmartZoneHostCandidate(process.env.SZ_MANAGEMENT_IP || '');
+  const candidates = [
+    { source: 'nbiIP', value: ctx.nbiIP },
+    { source: 'sip', value: ctx.sip },
+    { source: 'dn', value: ctx.dn },
+    { source: 'sz_management_ips_first', value: normalizedFromEnv },
+    { source: 'sz_management_ip_legacy', value: legacyFallback }
+  ];
+
+  const fallbackTrail = [];
+  for (const candidate of candidates) {
+    const normalizedValue = normalizeSmartZoneHostCandidate(candidate.value);
+    if (!normalizedValue) continue;
+    const validation = await validateSmartZoneHostAgainstAllowlist(normalizedValue);
+    if (validation.allowed) {
+      return {
+        host: validation.normalizedHost,
+        source: candidate.source,
+        validation_reason: validation.reason,
+        fallbackTrail
+      };
+    }
+    fallbackTrail.push({ source: candidate.source, value: normalizedValue, reason: validation.reason });
+    logInfo('smartzone_host_candidate_rejected', {
+      source: candidate.source,
+      value: normalizedValue,
+      reason: validation.reason,
+      allowlist: SMARTZONE_ALLOWLIST
+    });
+  }
+
+  return {
+    host: '',
+    source: null,
+    validation_reason: 'no_allowed_candidate',
+    fallbackTrail
+  };
 }
 
 async function pickSmartZoneHost(ctx = {}, action = async () => null) {
+  const hostResolution = await resolveSmartZoneHost(ctx);
   const rawNbiIp = String(ctx.nbiIP || '').trim();
-  const preferredHost = normalizeNbiIpCandidate(rawNbiIp);
-  const ignoredUnlistedNbiIp = Boolean(rawNbiIp && !preferredHost);
   const hosts = [];
 
-  if (preferredHost) hosts.push(preferredHost);
+  if (hostResolution.host) hosts.push(hostResolution.host);
   for (const host of SMARTZONE_HOSTS) {
-    if (!hosts.includes(host)) hosts.push(host);
+    const normalizedHost = normalizeSmartZoneHostCandidate(host);
+    if (!normalizedHost) continue;
+    const validation = await validateSmartZoneHostAgainstAllowlist(normalizedHost);
+    if (validation.allowed && !hosts.includes(normalizedHost)) hosts.push(normalizedHost);
   }
 
   if (hosts.length === 0) {
@@ -93,7 +192,9 @@ async function pickSmartZoneHost(ctx = {}, action = async () => null) {
       const didFailover = index > 0;
       logInfo('smartzone_host_selected', {
         requested_nbi_ip: rawNbiIp || null,
-        ignored_unlisted_nbi_ip: ignoredUnlistedNbiIp,
+        resolved_source: hostResolution.source,
+        resolved_host: hostResolution.host || null,
+        fallback_trail: hostResolution.fallbackTrail,
         selected_host: host,
         did_failover: didFailover,
         attempts: index + 1
@@ -260,7 +361,22 @@ function resolveWisprParams(params = {}) {
   return { userIp, userMac, proxy, nbiIP };
 }
 function hasRequiredWispr(ctx = {}) {
-  return Boolean(String(ctx.nbiIP || '').trim() && String(ctx.uip || '').trim() && String(ctx.client_mac || '').trim());
+  const hasClientMac = Boolean(String(ctx.client_mac || '').trim());
+  const hasUip = Boolean(String(ctx.uip || '').trim());
+  const hasApip = Boolean(String(ctx.apip || '').trim());
+  const hasSsid = Boolean(String(ctx.ssid || '').trim() || String(ctx.wlanName || '').trim());
+  const hasController = Boolean(String(ctx.nbiIP || '').trim() || String(ctx.sip || '').trim() || String(ctx.dn || '').trim());
+  return hasClientMac && hasUip && hasApip && hasSsid && hasController;
+}
+
+function getMissingWisprFields(ctx = {}) {
+  const missing = [];
+  if (!String(ctx.client_mac || '').trim()) missing.push('client_mac');
+  if (!String(ctx.uip || '').trim()) missing.push('uip');
+  if (!String(ctx.apip || '').trim()) missing.push('apip');
+  if (!String(ctx.ssid || '').trim() && !String(ctx.wlanName || '').trim()) missing.push('ssid_or_wlanName');
+  if (!String(ctx.nbiIP || '').trim() && !String(ctx.sip || '').trim() && !String(ctx.dn || '').trim()) missing.push('nbiIP_or_sip_or_dn');
+  return missing;
 }
 function pickWisprParams(raw = {}) {
   const params = normalizeBodyFields(raw);
@@ -512,7 +628,7 @@ async function resolvePortalStatusFromWispr(ctx = {}) {
 
   if (dbSession) {
     try {
-      const pick = await pickSmartZoneHost({ nbiIP: wispr.nbiIP }, (selectedHost) => statusAsync({
+      const pick = await pickSmartZoneHost(ctx, (selectedHost) => statusAsync({
         nbiIP: selectedHost,
         ueIp: normalizedIp,
         ueMac: normalizedMac,
@@ -627,7 +743,14 @@ async function createPortalSession(req, params) {
     client.release();
   }
 
-  logCtxPresence('portal_ctx_captured', lsid, ctx);
+  const hostResolution = await resolveSmartZoneHost(ctx);
+  logInfo('portal_ctx_captured', {
+    lsid,
+    params: sanitizeParams(ctx),
+    smartzone_host_resolved: hostResolution.host || null,
+    smartzone_host_source: hostResolution.source,
+    fallback_trail: hostResolution.fallbackTrail
+  });
   return lsid;
 }
 
@@ -735,7 +858,7 @@ async function hasRecentValidOtpForContext({ userId, ueIp, ueMac }) {
 }
 
 async function authorizeViaNbi(ctx, user) {
-  const { userIp, userMac, proxy, nbiIP } = resolveWisprParams(ctx);
+  const { userIp, userMac, proxy } = resolveWisprParams(ctx);
   if (!userIp || !userMac) {
     throw new AuthFlowError(
       'Parâmetros WISPr ausentes.',
@@ -745,9 +868,28 @@ async function authorizeViaNbi(ctx, user) {
     );
   }
 
-  logInfo('wispr_params_received', { lsid: user.sessionId, user_id: user.userId, user_ip: userIp, user_mac: maskMac(userMac), proxy, nbi_ip: nbiIP || null });
+  const hostResolution = await resolveSmartZoneHost(ctx);
+  if (!hostResolution.host) {
+    throw new AuthFlowError(
+      'Host SmartZone não permitido ou ausente.',
+      'Infraestrutura SmartZone indisponível no momento.',
+      503,
+      'smartzone_host_not_allowed'
+    );
+  }
 
-  const pick = await pickSmartZoneHost({ nbiIP }, (selectedHost) => loginAsync({
+  logInfo('wispr_params_received', {
+    lsid: user.sessionId,
+    user_id: user.userId,
+    user_ip: userIp,
+    user_mac: maskMac(userMac),
+    proxy,
+    smartzone_host_resolved: hostResolution.host,
+    smartzone_host_source: hostResolution.source,
+    fallback_trail: hostResolution.fallbackTrail
+  });
+
+  const pick = await pickSmartZoneHost(ctx, (selectedHost) => loginAsync({
     nbiIP: selectedHost,
     ueIp: userIp,
     ueMac: userMac,
@@ -1027,7 +1169,11 @@ app.get('/portal', async (req, res) => {
       return renderConnectedStatus(res, activeSession, { uip: clientIp });
     }
 
-    logInfo('portal_ctx_missing_blocked', { request_ip: req.ip, params: sanitizeParams(wisprCtx) });
+    logInfo('portal_ctx_missing_blocked', {
+      request_ip: req.ip,
+      params: sanitizeParams(wisprCtx),
+      missing_required_fields: getMissingWisprFields(wisprCtx)
+    });
     return renderInvalidAccess(res, {
       title: 'Acesso inválido',
       statusCode: 400,
