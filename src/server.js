@@ -37,6 +37,7 @@ const ADMIN_SESSION_COOKIE_NAME = 'admin_session';
 const ADMIN_SESSION_TTL_MS = Number(process.env.ADMIN_SESSION_TTL_MINUTES || 30) * 60 * 1000;
 const ADMIN_ALLOWED_CIDRS = String(process.env.ADMIN_ALLOWED_CIDRS || '10.9.62.0/23').split(',').map((item) => item.trim()).filter(Boolean);
 const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_PASSWORD_HASH || 'admin-session-secret';
+const ADMIN_USERNAME = String(process.env.ADMIN_USERNAME || 'admin');
 const smsProvider = buildSmsProvider();
 const DISPLAY_TIME_ZONE = 'America/Sao_Paulo';
 const SMARTZONE_HOSTS = [
@@ -795,11 +796,12 @@ function requestPrefersJson(req) {
 }
 
 app.get('/admin/login', (req, res) => {
-  res.render('admin_login', { title: 'Administração', error: null });
+  res.render('admin_login', { title: 'Administração', error: null, username: '' });
 });
 
 app.post('/admin/login', adminLoginLimiter, async (req, res) => {
   const adminPasswordHash = String(process.env.ADMIN_PASSWORD_HASH || '');
+  const providedUsername = String(req.body.username || '').trim();
   const providedPassword = String(req.body.password || '');
   const requestIp = getRequestClientIp(req);
 
@@ -807,16 +809,17 @@ app.post('/admin/login', adminLoginLimiter, async (req, res) => {
     logError('admin_login_misconfigured', {
       request_ip: requestIp || null
     });
-    return res.status(500).render('admin_login', { title: 'Administração', error: 'Admin não configurado no ambiente.' });
+    return res.status(500).render('admin_login', { title: 'Administração', error: 'Admin não configurado no ambiente.', username: providedUsername });
   }
 
+  const usernameMatches = providedUsername === ADMIN_USERNAME;
   const passwordMatches = await argon2.verify(adminPasswordHash, providedPassword);
-  if (!passwordMatches) {
+  if (!usernameMatches || !passwordMatches) {
     logInfo('admin_login_attempt', {
       status: 'failed',
       request_ip: requestIp || null
     });
-    return res.status(401).render('admin_login', { title: 'Administração', error: 'Credenciais inválidas.' });
+    return res.status(401).render('admin_login', { title: 'Administração', error: 'Credenciais inválidas.', username: providedUsername });
   }
 
   logInfo('admin_login_attempt', {
