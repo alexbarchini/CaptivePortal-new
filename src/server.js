@@ -40,6 +40,15 @@ const OTP_SEND_BLOCK_SECONDS = Number(process.env.OTP_SEND_BLOCK_SECONDS || 900)
 const OTP_INVALID_WINDOW_SECONDS = Number(process.env.OTP_INVALID_WINDOW_SECONDS || 600);
 const OTP_INVALID_MAX_PER_WINDOW = Number(process.env.OTP_INVALID_MAX_PER_WINDOW || 5);
 const OTP_INVALID_BLOCK_SECONDS = Number(process.env.OTP_INVALID_BLOCK_SECONDS || 900);
+const LOGIN_INVALID_CPF_WINDOW_SECONDS = 600;
+const LOGIN_INVALID_CPF_MAX_PER_WINDOW = 5;
+const LOGIN_INVALID_CPF_BLOCK_SECONDS = 900;
+const LOGIN_INVALID_IP_WINDOW_SECONDS = 300;
+const LOGIN_INVALID_IP_MAX_PER_WINDOW = 20;
+const LOGIN_INVALID_IP_BLOCK_SECONDS = 600;
+const LOGIN_INVALID_MAC_WINDOW_SECONDS = 600;
+const LOGIN_INVALID_MAC_MAX_PER_WINDOW = 10;
+const LOGIN_INVALID_MAC_BLOCK_SECONDS = 600;
 const LOGIN_SESSION_TTL_SECONDS = Number(process.env.LOGIN_SESSION_TTL_SECONDS || 600);
 const ADMIN_SESSION_COOKIE_NAME = 'admin_session';
 const ADMIN_SESSION_TTL_MS = Number(process.env.ADMIN_SESSION_TTL_HOURS || 8) * 60 * 60 * 1000;
@@ -1045,6 +1054,10 @@ function buildOtpInvalidFriendlyMessage() {
   return 'Muitas tentativas inválidas de código. Aguarde alguns minutos antes de tentar novamente.';
 }
 
+function buildLoginBruteforceFriendlyMessage() {
+  return 'Credenciais inválidas ou muitas tentativas. Aguarde alguns minutos antes de tentar novamente.';
+}
+
 async function recordAuthEvent({ eventType, lsid = null, userId = null, cpf = null, clientMac = null, clientIp = null, ssid = null, apIp = null, vlan = null, userAgent = null, details = null }) {
   await pool.query(
     `INSERT INTO auth_events (event_type, lsid, user_id, cpf, client_mac, client_ip, ssid, ap_ip, vlan, user_agent, details_json, login_session_id, status, detail)
@@ -1076,6 +1089,167 @@ async function getActiveSecurityBlock(correlationType, correlationValue, eventTy
     [correlationType, correlationValue, eventType]
   );
   return result.rows[0] || null;
+}
+
+async function evaluateLoginBruteforceBlocks({ cpf, clientIp = null, clientMac = null }) {
+  const normalizedIp = normalizeClientIp(clientIp);
+  const normalizedMac = normalizeMacIfPlain(clientMac);
+
+  const cpfBlock = cpf ? await getActiveSecurityBlock('cpf', cpf, 'cpf_bruteforce_suspected') : null;
+  const ipBlock = normalizedIp ? await getActiveSecurityBlock('ip', normalizedIp, 'ip_bruteforce_suspected') : null;
+  const macBlock = normalizedMac ? await getActiveSecurityBlock('mac', normalizedMac, 'mac_bruteforce_suspected') : null;
+
+  const activeBlocks = [cpfBlock, ipBlock, macBlock].filter(Boolean);
+  if (activeBlocks.length === 0) return null;
+
+  const primaryBlock = activeBlocks.reduce((latest, current) => {
+    if (!latest) return current;
+    return new Date(current.blocked_until) > new Date(latest.blocked_until) ? current : latest;
+  }, null);
+
+  await recordSecurityEvent({
+    eventType: 'login_blocked',
+    severity: 'high',
+    correlationType: primaryBlock.correlation_type,
+    correlationValue: primaryBlock.correlation_value,
+    description: 'Tentativa de login bloqueada por proteção anti-força-bruta.',
+    reason: 'active_bruteforce_block',
+    attemptCount: primaryBlock.attempt_count,
+    windowSeconds: primaryBlock.window_seconds,
+    blockedUntil: primaryBlock.blocked_until,
+    details: {
+      cpf,
+      client_ip: normalizedIp || null,
+      client_mac: normalizedMac || null,
+      blocked_by: activeBlocks.map((item) => ({
+        correlation_type: item.correlation_type,
+        correlation_value: item.correlation_value,
+        blocked_until: item.blocked_until,
+        attempt_count: item.attempt_count,
+        window_seconds: item.window_seconds
+      }))
+    }
+  });
+
+  return primaryBlock;
+}
+
+async function registerInvalidLoginAttempt({ cpf, clientIp = null, clientMac = null, lsid = null, userAgent = '' }) {
+  const normalizedIp = normalizeClientIp(clientIp);
+  const normalizedMac = normalizeMacIfPlain(clientMac);
+
+  await recordAuthEvent({
+    eventType: 'login_invalid_credentials',
+    lsid,
+    userId: null,
+    cpf,
+    clientIp: normalizedIp,
+    clientMac: normalizedMac,
+    userAgent,
+    details: {
+      reason: 'invalid_credentials',
+      cpf_window_seconds: LOGIN_INVALID_CPF_WINDOW_SECONDS,
+      ip_window_seconds: LOGIN_INVALID_IP_WINDOW_SECONDS,
+      mac_window_seconds: LOGIN_INVALID_MAC_WINDOW_SECONDS
+    }
+  });
+
+  const countByCpfQuery = cpf
+    ? pool.query(
+      `SELECT COUNT(*)::int AS attempt_count
+       FROM auth_events
+       WHERE event_type = 'login_invalid_credentials'
+         AND cpf = $1
+         AND created_at >= NOW() - ($2::int * INTERVAL '1 second')`,
+      [cpf, LOGIN_INVALID_CPF_WINDOW_SECONDS]
+    )
+    : Promise.resolve({ rows: [{ attempt_count: 0 }] });
+  const countByIpQuery = normalizedIp
+    ? pool.query(
+      `SELECT COUNT(*)::int AS attempt_count
+       FROM auth_events
+       WHERE event_type = 'login_invalid_credentials'
+         AND client_ip = $1
+         AND created_at >= NOW() - ($2::int * INTERVAL '1 second')`,
+      [normalizedIp, LOGIN_INVALID_IP_WINDOW_SECONDS]
+    )
+    : Promise.resolve({ rows: [{ attempt_count: 0 }] });
+  const countByMacQuery = normalizedMac
+    ? pool.query(
+      `SELECT COUNT(*)::int AS attempt_count
+       FROM auth_events
+       WHERE event_type = 'login_invalid_credentials'
+         AND UPPER(regexp_replace(COALESCE(client_mac, ''), '[^A-Fa-f0-9]', '', 'g')) = UPPER(regexp_replace(COALESCE($1, ''), '[^A-Fa-f0-9]', '', 'g'))
+         AND created_at >= NOW() - ($2::int * INTERVAL '1 second')`,
+      [normalizedMac, LOGIN_INVALID_MAC_WINDOW_SECONDS]
+    )
+    : Promise.resolve({ rows: [{ attempt_count: 0 }] });
+
+  const [countByCpfResult, countByIpResult, countByMacResult] = await Promise.all([countByCpfQuery, countByIpQuery, countByMacQuery]);
+
+  const countByCpf = countByCpfResult.rows[0]?.attempt_count || 0;
+  const countByIp = countByIpResult.rows[0]?.attempt_count || 0;
+  const countByMac = countByMacResult.rows[0]?.attempt_count || 0;
+
+  if (cpf && countByCpf >= LOGIN_INVALID_CPF_MAX_PER_WINDOW) {
+    const blockedUntilQuery = await pool.query(
+      `SELECT NOW() + ($1::int * INTERVAL '1 second') AS blocked_until`,
+      [LOGIN_INVALID_CPF_BLOCK_SECONDS]
+    );
+    const blockedUntil = blockedUntilQuery.rows[0]?.blocked_until || null;
+    await recordSecurityEvent({
+      eventType: 'cpf_bruteforce_suspected',
+      severity: 'high',
+      correlationType: 'cpf',
+      correlationValue: cpf,
+      description: 'Tentativas inválidas de login excederam limite por CPF.',
+      reason: 'max_5_invalid_in_10_minutes',
+      attemptCount: countByCpf,
+      windowSeconds: LOGIN_INVALID_CPF_WINDOW_SECONDS,
+      blockedUntil,
+      details: { cpf, client_ip: normalizedIp || null, client_mac: normalizedMac || null }
+    });
+  }
+
+  if (normalizedIp && countByIp >= LOGIN_INVALID_IP_MAX_PER_WINDOW) {
+    const blockedUntilQuery = await pool.query(
+      `SELECT NOW() + ($1::int * INTERVAL '1 second') AS blocked_until`,
+      [LOGIN_INVALID_IP_BLOCK_SECONDS]
+    );
+    const blockedUntil = blockedUntilQuery.rows[0]?.blocked_until || null;
+    await recordSecurityEvent({
+      eventType: 'ip_bruteforce_suspected',
+      severity: 'high',
+      correlationType: 'ip',
+      correlationValue: normalizedIp,
+      description: 'Tentativas inválidas de login excederam limite por IP.',
+      reason: 'max_20_invalid_in_5_minutes',
+      attemptCount: countByIp,
+      windowSeconds: LOGIN_INVALID_IP_WINDOW_SECONDS,
+      blockedUntil,
+      details: { cpf, client_ip: normalizedIp, client_mac: normalizedMac || null }
+    });
+  }
+
+  if (normalizedMac && countByMac >= LOGIN_INVALID_MAC_MAX_PER_WINDOW) {
+    const blockedUntilQuery = await pool.query(
+      `SELECT NOW() + ($1::int * INTERVAL '1 second') AS blocked_until`,
+      [LOGIN_INVALID_MAC_BLOCK_SECONDS]
+    );
+    const blockedUntil = blockedUntilQuery.rows[0]?.blocked_until || null;
+    await recordSecurityEvent({
+      eventType: 'mac_bruteforce_suspected',
+      severity: 'high',
+      correlationType: 'mac',
+      correlationValue: normalizedMac,
+      description: 'Tentativas inválidas de login excederam limite por MAC.',
+      reason: 'max_10_invalid_in_10_minutes',
+      attemptCount: countByMac,
+      windowSeconds: LOGIN_INVALID_MAC_WINDOW_SECONDS,
+      blockedUntil,
+      details: { cpf, client_ip: normalizedIp || null, client_mac: normalizedMac }
+    });
+  }
 }
 
 async function checkOtpSendRateLimit({ cpf, userId, lsid = null, clientIp = null, clientMac = null }) {
@@ -1374,7 +1548,8 @@ function mapAuthEventLabel(eventType = '') {
     sms_otp_login: 'Tentativa de autorização após OTP',
     controller_authorization_failed: 'Falha de autorização na controladora',
     session_denied: 'Sessão negada na etapa de autenticação',
-    otp_expired: 'Código OTP expirado'
+    otp_expired: 'Código OTP expirado',
+    login_invalid_credentials: 'Login inválido'
   };
   return labels[eventType] || eventType;
 }
@@ -1387,7 +1562,11 @@ function mapSecurityEventLabel(eventType = '') {
     otp_validation_blocked: 'Validação de OTP temporariamente bloqueada',
     multiple_failures_same_cpf: 'Múltiplas falhas de autenticação no mesmo CPF',
     multiple_failures_same_ip: 'Múltiplas falhas de autenticação no mesmo IP',
-    multiple_failures_same_mac: 'Múltiplas falhas de autenticação no mesmo MAC'
+    multiple_failures_same_mac: 'Múltiplas falhas de autenticação no mesmo MAC',
+    cpf_bruteforce_suspected: 'Força bruta suspeita por CPF',
+    ip_bruteforce_suspected: 'Força bruta suspeita por IP',
+    mac_bruteforce_suspected: 'Força bruta suspeita por MAC',
+    login_blocked: 'Tentativa de login bloqueada'
   };
   return labels[eventType] || eventType;
 }
@@ -1397,7 +1576,11 @@ function mapSecurityReason(reason = '') {
     max_3_in_10_minutes: '3 envios de SMS em menos de 10 minutos',
     'max 3 envios em 10 minutos': '3 envios de SMS em menos de 10 minutos',
     '5 otp inválidos em 10 minutos': '5 OTP inválidos em 10 minutos',
-    max_sessions_exceeded: '6ª sessão aberta para o mesmo CPF'
+    max_sessions_exceeded: '6ª sessão aberta para o mesmo CPF',
+    max_5_invalid_in_10_minutes: '5 tentativas inválidas em 10 minutos',
+    max_20_invalid_in_5_minutes: '20 tentativas inválidas em 5 minutos',
+    max_10_invalid_in_10_minutes: '10 tentativas inválidas em 10 minutos',
+    active_bruteforce_block: 'Tentativa bloqueada por bloqueio anti-força-bruta ativo'
   };
   return labels[reason] || reason || '-';
 }
@@ -1934,7 +2117,17 @@ app.post('/login', async (req, res) => {
   }
 
   const { cpf, password } = parsed.data;
+  const wispr = resolveWisprParams(params);
   try {
+    const activeBruteforceBlock = await evaluateLoginBruteforceBlocks({
+      cpf,
+      clientIp: wispr.userIp || req.ip,
+      clientMac: wispr.userMac
+    });
+    if (activeBruteforceBlock) {
+      throw new AuthFlowError('Tentativa bloqueada por força bruta.', buildLoginBruteforceFriendlyMessage(), 429, 'login_bruteforce_blocked');
+    }
+
     const query = await pool.query(
       `SELECT id, cpf_normalizado, username_radius, password_hash, is_active, expires_at, phone_e164
        FROM users
@@ -1964,7 +2157,6 @@ app.post('/login', async (req, res) => {
       [lsid, user.id, user.username_radius, password]
     );
 
-    const wispr = resolveWisprParams(params);
     const hasRecentValidOtp = await hasRecentValidOtpForContext({ userId: user.id, ueIp: wispr.userIp, ueMac: wispr.userMac });
     if (!hasRecentValidOtp) {
       await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'login', ueIp: wispr.userIp, ueMac: wispr.userMac, lsid });
@@ -1974,6 +2166,17 @@ app.post('/login', async (req, res) => {
 
     return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
   } catch (error) {
+    const shouldCountAsInvalidCredential = !(error instanceof AuthFlowError && ['login_bruteforce_blocked', 'otp_send_rate_limited'].includes(error.reason));
+    if (shouldCountAsInvalidCredential) {
+      await registerInvalidLoginAttempt({
+        cpf,
+        clientIp: wispr.userIp || req.ip,
+        clientMac: wispr.userMac,
+        lsid,
+        userAgent: req.get('user-agent') || ''
+      });
+    }
+
     logError('login_attempt_failed', { ...requestContext, reason: error.reason || undefined, error });
     if (error instanceof AuthFlowError && error.reason === 'otp_send_rate_limited') {
       return res.status(429).render('verify_sms', {
@@ -1984,6 +2187,15 @@ app.post('/login', async (req, res) => {
         maskedPhone: '',
         resendWaitSeconds: OTP_RESEND_COOLDOWN_SECONDS,
         contextBadge: buildContextBadge(params)
+      });
+    }
+    if (error instanceof AuthFlowError && error.reason === 'login_bruteforce_blocked') {
+      return res.status(429).render('portal', {
+        title: 'Portal Visitantes TRT9',
+        error: buildLoginBruteforceFriendlyMessage(),
+        message: null,
+        lsid,
+        contextBadge: null
       });
     }
     return genericInvalidCredentials(res, lsid, error.statusCode || 401);
