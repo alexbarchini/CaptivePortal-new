@@ -2,6 +2,7 @@ const axios = require('axios');
 const https = require('https');
 const crypto = require('crypto');
 const { logInfo, logError } = require('../utils/logger');
+const { resolveNbiMode, isMockMode, validateNbiConfigOrThrow } = require('./nbiConfig');
 
 const REQUEST_TIMEOUT_MS = Number(process.env.NBI_REQUEST_TIMEOUT_MS || 3000);
 const STATUS_POLL_INTERVAL_MS = 1000;
@@ -252,7 +253,9 @@ async function postWithFallback({ nbiIP, payload, requestType, requestId, ueIp, 
 }
 
 async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword }) {
-  if (process.env.NBI_MOCK === 'true') {
+  const nbiMode = resolveNbiMode();
+  logInfo('nbi_authorization_mode', { mode: nbiMode, operation: 'login_async' });
+  if (isMockMode()) {
     const detail = { ResponseCode: '101', ReplyMessage: 'Login accepted (mock).', AuthState: 'UNAUTHORIZED' };
     const interpretation = interpretControllerAuthorization(detail);
     logStatusInterpretation({ requestId: 'nbi-mock', endpoint: 'mock://nbi/login', interpretation });
@@ -268,6 +271,8 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
       requestId: 'nbi-mock'
     };
   }
+
+  validateNbiConfigOrThrow();
 
   const requestId = crypto.randomUUID();
   const ueMacController = macToControllerFormat(ueMac);
@@ -393,9 +398,13 @@ async function loginAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword })
 }
 
 async function disconnectAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername }) {
-  if (process.env.NBI_MOCK === 'true') {
+  const nbiMode = resolveNbiMode();
+  logInfo('nbi_authorization_mode', { mode: nbiMode, operation: 'disconnect_async' });
+  if (isMockMode()) {
     return { success: true, mode: 'mock', detail: { ReplyMessage: 'NBI mock habilitado.' } };
   }
+
+  validateNbiConfigOrThrow();
 
   const requestId = crypto.randomUUID();
   const ueMacController = macToControllerFormat(ueMac);
@@ -429,7 +438,9 @@ async function disconnectAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername }) {
 }
 
 async function statusAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword }) {
-  if (process.env.NBI_MOCK === 'true') {
+  const nbiMode = resolveNbiMode();
+  logInfo('nbi_authorization_mode', { mode: nbiMode, operation: 'status_async' });
+  if (isMockMode()) {
     const detail = { ResponseCode: '101', ReplyMessage: 'Status checked (mock).', AuthState: 'UNAUTHORIZED' };
     const interpretation = interpretControllerAuthorization(detail);
     logStatusInterpretation({ requestId: 'nbi-mock', endpoint: 'mock://nbi/status', interpretation });
@@ -444,6 +455,8 @@ async function statusAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword }
       detail
     };
   }
+
+  validateNbiConfigOrThrow();
 
   const requestId = crypto.randomUUID();
   const ueMacController = macToControllerFormat(ueMac);

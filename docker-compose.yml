@@ -16,8 +16,10 @@ services:
       PRIVACY_VERSION: v1.0
       NBI_REQUEST_USERNAME: external-portal
       NBI_REQUEST_PASSWORD: changeme
-      SZ_MANAGEMENT_IP: 10.0.0.10
-      NBI_MOCK: "true"
+      SZ_MANAGEMENT_IPS: 10.9.88.51,10.9.88.52
+      SZ_MANAGEMENT_IP: 10.9.88.51
+      NBI_MODE: "real"
+      NBI_MOCK: "false"
       NBI_TLS_INSECURE: "true"
     volumes:
       - ./logs:/app/logs

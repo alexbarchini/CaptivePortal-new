@@ -22,6 +22,7 @@ const { buildSmsProvider } = require('./services/smsProvider');
 const { enforceMaxOpenSessions, closeStaleAuthorizedOpenSessions } = require('./services/sessionCleanup');
 const { logInfo, logError, LOG_TZ, AUTH_LOG_FILE_PATH } = require('./utils/logger');
 const { detectDeviceType } = require('./utils/device');
+const { resolveNbiMode, validateNbiConfigOrThrow, buildNbiConfigSnapshot } = require('./services/nbiConfig');
 
 const app = express();
 const TRUST_PROXY = (process.env.TRUST_PROXY || 'true').toLowerCase() !== 'false';
@@ -42,6 +43,24 @@ const PORTAL_CAPTURE_REPEAT_WINDOW_MS = Number(process.env.PORTAL_CAPTURE_REPEAT
 const smsProvider = buildSmsProvider();
 const DISPLAY_TIME_ZONE = 'America/Sao_Paulo';
 const portalCaptureTracker = new Map();
+
+
+function logNbiStartupConfiguration() {
+  const nbiMode = resolveNbiMode();
+  const snapshot = buildNbiConfigSnapshot();
+  const nbiEndpoints = snapshot.smartZoneHosts.map((host) => `https://${host}:9443/portalintf`);
+
+  logInfo('nbi_startup_configuration', {
+    nbi_mode: nbiMode,
+    smartzone_hosts: snapshot.smartZoneHosts,
+    nbi_endpoints: nbiEndpoints,
+    tls_insecure: String(process.env.NBI_TLS_INSECURE || 'false').toLowerCase() === 'true'
+  });
+
+  if (nbiMode === 'real') {
+    validateNbiConfigOrThrow();
+  }
+}
 function parseSmartZoneManagementIps(rawValue = '') {
   return [...new Set(
     String(rawValue || '')
@@ -1985,6 +2004,8 @@ app.get('/success', (req, res) => {
 });
 
 async function bootstrap() {
+  logNbiStartupConfiguration();
+
   await runMigrations(pool);
 
   await closeStaleAuthorizedOpenSessions(24);
