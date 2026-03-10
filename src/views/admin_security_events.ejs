@@ -8,31 +8,78 @@
   <link rel="stylesheet" href="/public/admin.css" />
 </head>
 <body>
-  <%- include('partials/admin_header', { showLogout: true, pageTitle: 'Administração · Security events' }) %>
+  <%- include('partials/admin_header', { showLogout: true, pageTitle: 'Administração · Security Events' }) %>
   <main class="admin-shell">
     <section class="card admin-card">
-      <h2>Security events (últimos 200)</h2>
+      <h2>Security Events</h2>
       <p class="subtle">Administrador: <strong><%= adminUser %></strong></p>
-      <p class="subtle"><a href="/admin/sessions">Sessões</a> · <a href="/admin/auth-events">Auth events</a></p>
+      <p class="subtle"><a href="/admin/sessions">Sessões</a> · <a href="/admin/security-events">Security Events</a> · <a href="/admin/auth-failures">Auth Failures</a></p>
+
+      <form method="get" action="/admin/security-events" class="admin-filters">
+        <div class="filter-field">
+          <label for="cpf">CPF</label>
+          <input id="cpf" name="cpf" value="<%= filters?.cpf || '' %>" placeholder="000.000.000-00" />
+        </div>
+        <div class="filter-field">
+          <label for="mac">MAC</label>
+          <input id="mac" name="mac" value="<%= filters?.mac || '' %>" placeholder="AA:BB:CC:DD:EE:FF" />
+        </div>
+        <div class="filter-field">
+          <label for="ip">IP</label>
+          <input id="ip" name="ip" value="<%= filters?.ip || '' %>" placeholder="172.27.0.12" />
+        </div>
+        <div class="filter-field">
+          <label for="event_type">Tipo de evento</label>
+          <input id="event_type" name="event_type" value="<%= filters?.event_type || '' %>" placeholder="sms_abuse_suspected" />
+        </div>
+        <div class="filter-field">
+          <label for="severity">Severidade</label>
+          <input id="severity" name="severity" value="<%= filters?.severity || '' %>" placeholder="high" />
+        </div>
+        <div class="filter-field">
+          <label for="from">De (data/hora)</label>
+          <input id="from" name="from" type="datetime-local" value="<%= filters?.from || '' %>" />
+        </div>
+        <div class="filter-field">
+          <label for="to">Até (data/hora)</label>
+          <input id="to" name="to" type="datetime-local" value="<%= filters?.to || '' %>" />
+        </div>
+        <div class="filter-field filter-status">
+          <span class="filter-label">Apenas bloqueios ativos</span>
+          <label class="checkbox-inline">
+            <input type="checkbox" name="only_active_blocks" value="true" <%= filters?.only_active_blocks ? 'checked' : '' %> /> Sim
+          </label>
+        </div>
+        <div class="filter-actions">
+          <button type="submit">Filtrar</button>
+        </div>
+      </form>
 
       <div class="table-wrap">
         <table class="admin-table">
           <thead>
             <tr>
-              <th>Quando</th><th>Evento</th><th>Severidade</th><th>Correlação</th><th>Motivo</th><th>Tentativas</th><th>Janela(s)</th><th>Bloqueado até</th>
+              <th>Data/hora</th><th>Severidade</th><th>Tipo</th><th>Descrição</th><th>Motivo</th><th>CPF</th><th>MAC</th><th>IP</th><th>Tentativas</th><th>Janela</th><th>Bloqueado até</th><th>Contexto</th>
             </tr>
           </thead>
           <tbody>
             <% (events || []).forEach((event) => { %>
+              <% const isCpf = event.correlation_type === 'cpf'; %>
+              <% const isMac = event.correlation_type === 'mac'; %>
+              <% const isIp = event.correlation_type === 'ip'; %>
               <tr>
                 <td><%= event.created_at_label %></td>
-                <td title="<%= event.event_type %>"><%= event.event_label %></td>
                 <td><%= event.severity %></td>
-                <td class="truncate" title="<%= event.correlation_type %>:<%= event.correlation_value %>"><%= event.correlation_type %>:<%= event.correlation_value %></td>
-                <td class="truncate" title="<%= event.reason || event.description || '-' %>"><%= event.reason || event.description || '-' %></td>
+                <td title="<%= event.event_type %>"><%= event.event_label %></td>
+                <td class="truncate" title="<%= event.description_label || '-' %>"><%= event.description_label || '-' %></td>
+                <td class="truncate" title="<%= event.reason_label || '-' %>"><%= event.reason_label || '-' %></td>
+                <td><%= isCpf ? event.correlation_value : (event.details_json?.cpf || '-') %></td>
+                <td><%= isMac ? event.correlation_value : (event.details_json?.client_mac || '-') %></td>
+                <td><%= isIp ? event.correlation_value : (event.details_json?.client_ip || '-') %></td>
                 <td><%= event.attempt_count || '-' %></td>
                 <td><%= event.window_seconds || '-' %></td>
                 <td><%= event.blocked_until_label || '-' %></td>
+                <td class="truncate" title="<%= JSON.stringify(event.details_json || {}) %>"><%= JSON.stringify(event.details_json || {}) %></td>
               </tr>
             <% }) %>
           </tbody>

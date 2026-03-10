@@ -1195,6 +1195,19 @@ async function checkOtpInvalidBlock({ cpf, userId, lsid, clientIp, clientMac }) 
     }
   });
 
+  await recordSecurityEvent({
+    eventType: 'otp_validation_blocked',
+    severity: 'high',
+    correlationType: 'cpf',
+    correlationValue: cpf,
+    description: 'Validação de OTP temporariamente bloqueada.',
+    reason: '5 OTP inválidos em 10 minutos',
+    attemptCount: activeBlock.attempt_count || OTP_INVALID_MAX_PER_WINDOW,
+    windowSeconds: OTP_INVALID_WINDOW_SECONDS,
+    blockedUntil: activeBlock.blocked_until,
+    details: { cpf, user_id: userId, lsid, client_ip: normalizeClientIp(clientIp), client_mac: normalizeMacIfPlain(clientMac) }
+  });
+
   return { blocked: true, blockedUntil: activeBlock.blocked_until };
 }
 
@@ -1358,17 +1371,35 @@ function mapAuthEventLabel(eventType = '') {
     sms_rate_limited: 'Envio de SMS limitado por proteção',
     otp_invalid: 'Tentativa de OTP inválida',
     otp_validation_blocked: 'Validação OTP bloqueada',
-    sms_otp_login: 'Tentativa de autorização após OTP'
+    sms_otp_login: 'Tentativa de autorização após OTP',
+    controller_authorization_failed: 'Falha de autorização na controladora',
+    session_denied: 'Sessão negada na etapa de autenticação',
+    otp_expired: 'Código OTP expirado'
   };
   return labels[eventType] || eventType;
 }
 
 function mapSecurityEventLabel(eventType = '') {
   const labels = {
-    sms_abuse_suspected: 'Suspeita de abuso de envio SMS',
-    bruteforce_otp_suspected: 'Suspeita de brute force de OTP'
+    sms_abuse_suspected: 'Excesso de envios de SMS',
+    bruteforce_otp_suspected: 'Muitas tentativas inválidas de OTP',
+    max_active_sessions_enforced: 'Sessão antiga encerrada por excesso de sessões ativas',
+    otp_validation_blocked: 'Validação de OTP temporariamente bloqueada',
+    multiple_failures_same_cpf: 'Múltiplas falhas de autenticação no mesmo CPF',
+    multiple_failures_same_ip: 'Múltiplas falhas de autenticação no mesmo IP',
+    multiple_failures_same_mac: 'Múltiplas falhas de autenticação no mesmo MAC'
   };
   return labels[eventType] || eventType;
+}
+
+function mapSecurityReason(reason = '') {
+  const labels = {
+    max_3_in_10_minutes: '3 envios de SMS em menos de 10 minutos',
+    'max 3 envios em 10 minutos': '3 envios de SMS em menos de 10 minutos',
+    '5 otp inválidos em 10 minutos': '5 OTP inválidos em 10 minutos',
+    max_sessions_exceeded: '6ª sessão aberta para o mesmo CPF'
+  };
+  return labels[reason] || reason || '-';
 }
 
 app.get('/admin/sessions', async (req, res) => {
@@ -1515,33 +1546,129 @@ app.get('/admin/lookup', (req, res) => {
   return res.redirect(query ? `/admin/sessions?${query}` : '/admin/sessions');
 });
 
-app.get('/admin/auth-events', async (req, res) => {
+app.get('/admin/auth-events', (req, res) => {
+  return res.redirect('/admin/auth-failures');
+});
+
+app.get('/admin/auth-failures', async (req, res) => {
+  const cpf = cleanDigits(String(req.query.cpf || ''));
+  const macRaw = String(req.query.mac || '').trim();
+  const mac = normalizeMacForFilter(macRaw);
+  const ip = normalizeClientIp(String(req.query.ip || ''));
+  const lsid = String(req.query.lsid || '').trim();
+  const eventType = String(req.query.event_type || '').trim().toLowerCase();
+  const fromRaw = String(req.query.from || '').trim();
+  const toRaw = String(req.query.to || '').trim();
+  const fromIso = parseDatetimeLocal(fromRaw);
+  const toIso = parseDatetimeLocal(toRaw);
+
+  const filters = [];
+  const values = [];
+  const pushFilter = (sql, value) => {
+    values.push(value);
+    filters.push(sql.replace('?', `$${values.length}`));
+  };
+
+  if (cpf) pushFilter('cpf = ?', cpf);
+  if (macRaw && mac.length === 12) pushFilter("UPPER(regexp_replace(COALESCE(client_mac, ''), '[^A-Fa-f0-9]', '', 'g')) = ?", mac);
+  if (ip) pushFilter('client_ip = ?', ip);
+  if (lsid) pushFilter('lsid = ?', lsid);
+  if (eventType) pushFilter('LOWER(event_type) = ?', eventType);
+  if (fromIso) pushFilter('created_at >= ?', fromIso);
+  if (toIso) pushFilter('created_at <= ?', toIso);
+
+  values.push(200);
+  const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
   const rows = await pool.query(
     `SELECT id, created_at, event_type, lsid, user_id, cpf, client_ip, client_mac, details_json
      FROM auth_events
+     ${whereClause}
      ORDER BY created_at DESC
-     LIMIT 200`
+     LIMIT $${values.length}`,
+    values
   );
 
   return res.render('admin_auth_events', {
-    title: 'Administração · Auth events',
+    title: 'Administração · Auth Failures',
     adminUser: req.adminSession.user,
-    events: rows.rows.map((event) => ({ ...event, event_label: mapAuthEventLabel(event.event_type), created_at_label: formatDateTime(event.created_at) }))
+    filters: { cpf, mac: macRaw, ip, lsid, event_type: eventType, from: fromRaw, to: toRaw },
+    events: rows.rows.map((event) => ({
+      ...event,
+      event_label: mapAuthEventLabel(event.event_type),
+      created_at_label: formatDateTime(event.created_at),
+      reason_label: mapSecurityReason(event.details_json?.reason || '')
+    }))
   });
 });
 
 app.get('/admin/security-events', async (req, res) => {
+  const cpf = cleanDigits(String(req.query.cpf || ''));
+  const macRaw = String(req.query.mac || '').trim();
+  const mac = normalizeMacForFilter(macRaw);
+  const ip = normalizeClientIp(String(req.query.ip || ''));
+  const eventType = String(req.query.event_type || '').trim().toLowerCase();
+  const severity = String(req.query.severity || '').trim().toLowerCase();
+  const onlyActiveBlocks = String(req.query.only_active_blocks || '').trim().toLowerCase() === 'true';
+  const fromRaw = String(req.query.from || '').trim();
+  const toRaw = String(req.query.to || '').trim();
+  const fromIso = parseDatetimeLocal(fromRaw);
+  const toIso = parseDatetimeLocal(toRaw);
+
+  const filters = [];
+  const values = [];
+  const pushFilter = (sql, value) => {
+    values.push(value);
+    filters.push(sql.replace('?', `$${values.length}`));
+  };
+
+  if (eventType) pushFilter('LOWER(event_type) = ?', eventType);
+  if (severity) pushFilter('LOWER(severity) = ?', severity);
+  if (fromIso) pushFilter('created_at >= ?', fromIso);
+  if (toIso) pushFilter('created_at <= ?', toIso);
+  if (onlyActiveBlocks) filters.push('blocked_until IS NOT NULL AND blocked_until > NOW()');
+
+  const correlationFilters = [];
+
+  if (cpf) {
+    values.push(cpf);
+    correlationFilters.push(`(correlation_type = 'cpf' AND correlation_value = $${values.length})`);
+  }
+  if (macRaw && mac.length === 12) {
+    values.push(mac);
+    correlationFilters.push(`(correlation_type = 'mac' AND UPPER(regexp_replace(correlation_value, '[^A-Fa-f0-9]', '', 'g')) = $${values.length})`);
+  }
+  if (ip) {
+    values.push(ip);
+    correlationFilters.push(`(correlation_type = 'ip' AND correlation_value = $${values.length})`);
+  }
+
+  if (correlationFilters.length > 0) {
+    filters.push(`(${correlationFilters.join(' OR ')})`);
+  }
+
+  values.push(200);
+  const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
   const rows = await pool.query(
     `SELECT id, created_at, event_type, severity, correlation_type, correlation_value, description, reason, attempt_count, window_seconds, blocked_until, details_json
      FROM security_events
+     ${whereClause}
      ORDER BY created_at DESC
-     LIMIT 200`
+     LIMIT $${values.length}`,
+    values
   );
 
   return res.render('admin_security_events', {
-    title: 'Administração · Security events',
+    title: 'Administração · Security Events',
     adminUser: req.adminSession.user,
-    events: rows.rows.map((event) => ({ ...event, event_label: mapSecurityEventLabel(event.event_type), created_at_label: formatDateTime(event.created_at), blocked_until_label: formatDateTime(event.blocked_until) }))
+    filters: { cpf, mac: macRaw, ip, event_type: eventType, severity, from: fromRaw, to: toRaw, only_active_blocks: onlyActiveBlocks },
+    events: rows.rows.map((event) => ({
+      ...event,
+      event_label: mapSecurityEventLabel(event.event_type),
+      created_at_label: formatDateTime(event.created_at),
+      blocked_until_label: formatDateTime(event.blocked_until),
+      description_label: event.description || '-',
+      reason_label: mapSecurityReason(event.reason || '')
+    }))
   });
 });
 
@@ -2064,6 +2191,26 @@ async function verifySmsHandler(req, res) {
       );
       const invalidByLsidCount = invalidByLsidQuery.rows[0]?.attempt_count || 0;
 
+      const invalidByIpCountQuery = await pool.query(
+        `SELECT COUNT(*)::int AS attempt_count
+         FROM auth_events
+         WHERE client_ip = $1
+           AND event_type = 'otp_invalid'
+           AND created_at >= NOW() - ($2::int * INTERVAL '1 second')`,
+        [normalizeClientIp(wispr.userIp), OTP_INVALID_WINDOW_SECONDS]
+      );
+      const invalidByIpCount = invalidByIpCountQuery.rows[0]?.attempt_count || 0;
+
+      const invalidByMacCountQuery = await pool.query(
+        `SELECT COUNT(*)::int AS attempt_count
+         FROM auth_events
+         WHERE UPPER(regexp_replace(COALESCE(client_mac, ''), '[^A-Fa-f0-9]', '', 'g')) = UPPER(regexp_replace(COALESCE($1, ''), '[^A-Fa-f0-9]', '', 'g'))
+           AND event_type = 'otp_invalid'
+           AND created_at >= NOW() - ($2::int * INTERVAL '1 second')`,
+        [normalizeMacIfPlain(wispr.userMac), OTP_INVALID_WINDOW_SECONDS]
+      );
+      const invalidByMacCount = invalidByMacCountQuery.rows[0]?.attempt_count || 0;
+
       if (invalidByLsidCount >= 3) {
         await recordSecurityEvent({
           eventType: 'bruteforce_otp_suspected',
@@ -2080,6 +2227,46 @@ async function verifySmsHandler(req, res) {
       }
 
       if (invalidAttemptCount >= OTP_INVALID_MAX_PER_WINDOW) {
+        await recordSecurityEvent({
+          eventType: 'multiple_failures_same_cpf',
+          severity: 'high',
+          correlationType: 'cpf',
+          correlationValue: cpf,
+          description: 'Muitas falhas de OTP inválido para o mesmo CPF.',
+          reason: '5 OTP inválidos em 10 minutos',
+          attemptCount: invalidAttemptCount,
+          windowSeconds: OTP_INVALID_WINDOW_SECONDS,
+          blockedUntil: null,
+          details: { cpf, user_id: session.user_id, lsid: session.id }
+        });
+        if (invalidByIpCount >= OTP_INVALID_MAX_PER_WINDOW) {
+          await recordSecurityEvent({
+            eventType: 'multiple_failures_same_ip',
+            severity: 'medium',
+            correlationType: 'ip',
+            correlationValue: normalizeClientIp(wispr.userIp),
+            description: 'Muitas falhas de OTP inválido para o mesmo IP.',
+            reason: '5 OTP inválidos em 10 minutos',
+            attemptCount: invalidByIpCount,
+            windowSeconds: OTP_INVALID_WINDOW_SECONDS,
+            blockedUntil: null,
+            details: { cpf, user_id: session.user_id, lsid: session.id }
+          });
+        }
+        if (invalidByMacCount >= OTP_INVALID_MAX_PER_WINDOW) {
+          await recordSecurityEvent({
+            eventType: 'multiple_failures_same_mac',
+            severity: 'medium',
+            correlationType: 'mac',
+            correlationValue: normalizeMacIfPlain(wispr.userMac),
+            description: 'Muitas falhas de OTP inválido para o mesmo MAC.',
+            reason: '5 OTP inválidos em 10 minutos',
+            attemptCount: invalidByMacCount,
+            windowSeconds: OTP_INVALID_WINDOW_SECONDS,
+            blockedUntil: null,
+            details: { cpf, user_id: session.user_id, lsid: session.id }
+          });
+        }
         const blockUntilResult = await pool.query(`SELECT NOW() + ($1::int * INTERVAL '1 second') AS blocked_until`, [OTP_INVALID_BLOCK_SECONDS]);
         const blockedUntil = blockUntilResult.rows[0]?.blocked_until || null;
 
@@ -2109,6 +2296,19 @@ async function verifySmsHandler(req, res) {
           correlationValue: cpf,
           description: 'Tentativas inválidas repetidas de OTP por CPF.',
           reason: '5 otp inválidos em 10 minutos',
+          attemptCount: invalidAttemptCount,
+          windowSeconds: OTP_INVALID_WINDOW_SECONDS,
+          blockedUntil,
+          details: { cpf, user_id: session.user_id, lsid: session.id, client_ip: normalizeClientIp(wispr.userIp), client_mac: normalizeMacIfPlain(wispr.userMac) }
+        });
+
+        await recordSecurityEvent({
+          eventType: 'otp_validation_blocked',
+          severity: 'high',
+          correlationType: 'cpf',
+          correlationValue: cpf,
+          description: 'Validação de OTP temporariamente bloqueada.',
+          reason: '5 OTP inválidos em 10 minutos',
           attemptCount: invalidAttemptCount,
           windowSeconds: OTP_INVALID_WINDOW_SECONDS,
           blockedUntil,
@@ -2255,6 +2455,26 @@ async function verifySmsHandler(req, res) {
           active_count_after: maxSessionsResult.activeCountAfter,
           closed_reason: 'max_sessions_exceeded'
         });
+
+        await client.query(
+          `INSERT INTO security_events (event_type, severity, correlation_type, correlation_value, description, reason, attempt_count, window_seconds, blocked_until, details_json)
+           VALUES ('max_active_sessions_enforced', 'medium', 'cpf', $1, $2, $3, $4, NULL, NULL, $5::jsonb)`,
+          [
+            session.cpf_normalizado || String(session.user_id),
+            'Sessão antiga encerrada por excesso de sessões ativas',
+            'max_sessions_exceeded',
+            maxSessionsResult.activeCountBefore,
+            JSON.stringify({
+              user_id: session.user_id,
+              cpf: session.cpf_normalizado || null,
+              new_session_id: session.id,
+              closed_session_id: maxSessionsResult.closedSession.id,
+              active_count_before: maxSessionsResult.activeCountBefore,
+              active_count_after: maxSessionsResult.activeCountAfter,
+              closed_reason: 'max_sessions_exceeded'
+            })
+          ]
+        );
       }
 
       await client.query(

@@ -8,18 +8,52 @@
   <link rel="stylesheet" href="/public/admin.css" />
 </head>
 <body>
-  <%- include('partials/admin_header', { showLogout: true, pageTitle: 'Administração · Auth events' }) %>
+  <%- include('partials/admin_header', { showLogout: true, pageTitle: 'Administração · Auth Failures' }) %>
   <main class="admin-shell">
     <section class="card admin-card">
-      <h2>Auth events (últimos 200)</h2>
+      <h2>Auth Failures</h2>
       <p class="subtle">Administrador: <strong><%= adminUser %></strong></p>
-      <p class="subtle"><a href="/admin/sessions">Sessões</a> · <a href="/admin/security-events">Security events</a></p>
+      <p class="subtle"><a href="/admin/sessions">Sessões</a> · <a href="/admin/security-events">Security Events</a> · <a href="/admin/auth-failures">Auth Failures</a></p>
+
+      <form method="get" action="/admin/auth-failures" class="admin-filters">
+        <div class="filter-field">
+          <label for="cpf">CPF</label>
+          <input id="cpf" name="cpf" value="<%= filters?.cpf || '' %>" placeholder="000.000.000-00" />
+        </div>
+        <div class="filter-field">
+          <label for="mac">MAC</label>
+          <input id="mac" name="mac" value="<%= filters?.mac || '' %>" placeholder="AA:BB:CC:DD:EE:FF" />
+        </div>
+        <div class="filter-field">
+          <label for="ip">IP</label>
+          <input id="ip" name="ip" value="<%= filters?.ip || '' %>" placeholder="172.27.0.12" />
+        </div>
+        <div class="filter-field">
+          <label for="lsid">LSID</label>
+          <input id="lsid" name="lsid" value="<%= filters?.lsid || '' %>" placeholder="ID da sessão" />
+        </div>
+        <div class="filter-field">
+          <label for="event_type">Evento</label>
+          <input id="event_type" name="event_type" value="<%= filters?.event_type || '' %>" placeholder="otp_invalid" />
+        </div>
+        <div class="filter-field">
+          <label for="from">De (data/hora)</label>
+          <input id="from" name="from" type="datetime-local" value="<%= filters?.from || '' %>" />
+        </div>
+        <div class="filter-field">
+          <label for="to">Até (data/hora)</label>
+          <input id="to" name="to" type="datetime-local" value="<%= filters?.to || '' %>" />
+        </div>
+        <div class="filter-actions">
+          <button type="submit">Filtrar</button>
+        </div>
+      </form>
 
       <div class="table-wrap">
         <table class="admin-table">
           <thead>
             <tr>
-              <th>Quando</th><th>Evento</th><th>CPF</th><th>User ID</th><th>LSID</th><th>IP</th><th>MAC</th><th>Detalhes</th>
+              <th>Data/hora</th><th>Evento</th><th>CPF</th><th>MAC</th><th>IP</th><th>LSID</th><th>Motivo</th><th>Descrição</th>
             </tr>
           </thead>
           <tbody>
@@ -28,10 +62,10 @@
                 <td><%= event.created_at_label %></td>
                 <td title="<%= event.event_type %>"><%= event.event_label %></td>
                 <td><%= event.cpf || '-' %></td>
-                <td><%= event.user_id || '-' %></td>
-                <td class="truncate" title="<%= event.lsid || '-' %>"><%= event.lsid || '-' %></td>
-                <td><%= event.client_ip || '-' %></td>
                 <td><%= event.client_mac || '-' %></td>
+                <td><%= event.client_ip || '-' %></td>
+                <td class="truncate" title="<%= event.lsid || '-' %>"><%= event.lsid || '-' %></td>
+                <td class="truncate" title="<%= event.reason_label || '-' %>"><%= event.reason_label || '-' %></td>
                 <td class="truncate" title="<%= JSON.stringify(event.details_json || {}) %>"><%= JSON.stringify(event.details_json || {}) %></td>
               </tr>
             <% }) %>
