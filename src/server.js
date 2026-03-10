@@ -19,7 +19,7 @@ const {
 } = require('./utils/validators');
 const { loginAsync, disconnectAsync, statusAsync, isRetryableNbiError } = require('./services/ruckusNbi');
 const { buildSmsProvider } = require('./services/smsProvider');
-const { enforceMaxOpenSessions, closeStaleAuthorizedOpenSessions } = require('./services/sessionCleanup');
+const { enforceMaxOpenSessionsTx, closeStaleAuthorizedOpenSessions } = require('./services/sessionCleanup');
 const { logInfo, logError, LOG_TZ, AUTH_LOG_FILE_PATH } = require('./utils/logger');
 const { detectDeviceType } = require('./utils/device');
 const { resolveNbiMode, validateNbiConfigOrThrow, buildNbiConfigSnapshot } = require('./services/nbiConfig');
@@ -1840,29 +1840,56 @@ async function verifySmsHandler(req, res) {
       );
     }
 
-    await enforceMaxOpenSessions(session.user_id, session.id, 5);
-    await pool.query(
-      `UPDATE login_sessions
-       SET status = 'OPEN',
-           authorized_at = COALESCE(authorized_at, NOW()),
-           sz_nbi_ip = $2,
-           last_sz_nbi_ip = COALESCE(sz_nbi_ip, $2),
-           device_type = $3,
-           device_name = COALESCE($4, device_name),
-           user_agent = COALESCE(NULLIF($5, ''), user_agent)
-       WHERE id = $1`,
-      [session.id, selectedHostValidation.normalizedHost || null, deviceType, deviceName, req.get('user-agent') || '']
-    );
-    await pool.query(
-      `INSERT INTO portal_active_sessions (id, user_id, ue_ip, ue_mac, ssid, authorized_at, ended_at, last_seen_at, created_at)
-       VALUES ($1, $2, $3, $4, $5, NOW(), NULL, NOW(), NOW())
-       ON CONFLICT (user_id, ue_ip, ue_mac) DO UPDATE SET
-         ssid = EXCLUDED.ssid,
-         authorized_at = NOW(),
-         ended_at = NULL,
-         last_seen_at = NOW()`,
-      [crypto.randomUUID(), session.user_id, userIp, normalizeMacIfPlain(userMac), ctx.ssid || null]
-    );
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock($1)', [Number(session.user_id)]);
+
+      // Regra de negócio: após a controladora confirmar a autorização,
+      // mantemos no máximo 5 sessões OPEN por usuário e fechamos a OPEN mais antiga (nunca a sessão recém-autorizada).
+      await client.query(
+        `UPDATE login_sessions
+         SET status = 'OPEN',
+             authorized_at = COALESCE(authorized_at, NOW()),
+             sz_nbi_ip = $2,
+             last_sz_nbi_ip = COALESCE(sz_nbi_ip, $2),
+             device_type = $3,
+             device_name = COALESCE($4, device_name),
+             user_agent = COALESCE(NULLIF($5, ''), user_agent)
+         WHERE id = $1`,
+        [session.id, selectedHostValidation.normalizedHost || null, deviceType, deviceName, req.get('user-agent') || '']
+      );
+
+      const maxSessionsResult = await enforceMaxOpenSessionsTx(client, session.user_id, session.id, 5);
+      if (maxSessionsResult.enforced && maxSessionsResult.closedSession) {
+        logInfo('max_active_sessions_enforced', {
+          user_id: session.user_id,
+          new_session_id: session.id,
+          closed_session_id: maxSessionsResult.closedSession.id,
+          closed_session_authorized_at: maxSessionsResult.closedSession.authorized_at,
+          active_count_before: maxSessionsResult.activeCountBefore,
+          active_count_after: maxSessionsResult.activeCountAfter
+        });
+      }
+
+      await client.query(
+        `INSERT INTO portal_active_sessions (id, user_id, ue_ip, ue_mac, ssid, authorized_at, ended_at, last_seen_at, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW(), NULL, NOW(), NOW())
+         ON CONFLICT (user_id, ue_ip, ue_mac) DO UPDATE SET
+           ssid = EXCLUDED.ssid,
+           authorized_at = NOW(),
+           ended_at = NULL,
+           last_seen_at = NOW()`,
+        [crypto.randomUUID(), session.user_id, userIp, normalizeMacIfPlain(userMac), ctx.ssid || null]
+      );
+
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
     res.cookie('portal_session', String(session.user_id), { maxAge: SESSION_MAX_AGE_MS, httpOnly: true, sameSite: 'lax' });
 
     logInfo('controller_authorization_confirmed', {
