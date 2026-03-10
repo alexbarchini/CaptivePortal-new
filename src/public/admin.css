@@ -47,6 +47,39 @@
   background: var(--danger);
 }
 
+
+.admin-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 14px 0 18px;
+}
+
+.admin-nav-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 14px;
+  border: 1px solid #c8d4e8;
+  border-radius: 999px;
+  background: #f4f8ff;
+  color: #29435f;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.15s ease;
+}
+
+.admin-nav-tab:hover {
+  background: #e7f0ff;
+  border-color: #aac0e0;
+}
+
+.admin-nav-tab.is-active {
+  background: #29435f;
+  border-color: #29435f;
+  color: #ffffff;
+}
+
 .admin-filters {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
