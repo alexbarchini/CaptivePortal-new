@@ -88,12 +88,14 @@ async function enforceMaxOpenSessions(userId, keepLsid, maxOpen = 5) {
 
     if (result.enforced && result.closedSession) {
       logInfo('max_active_sessions_enforced', {
+        event: 'max_active_sessions_enforced',
         user_id: Number(userId),
         new_session_id: keepLsid || null,
         closed_session_id: result.closedSession.id,
         closed_session_authorized_at: result.closedSession.authorized_at,
         active_count_before: result.activeCountBefore,
-        active_count_after: result.activeCountAfter
+        active_count_after: result.activeCountAfter,
+        closed_reason: 'max_sessions_exceeded'
       });
     }
 

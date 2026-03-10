@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= title %></title>
+  <link rel="stylesheet" href="/public/style.css" />
+  <link rel="stylesheet" href="/public/admin.css" />
+</head>
+<body>
+  <%- include('partials/admin_header', { showLogout: true, pageTitle: 'Administração · Security events' }) %>
+  <main class="admin-shell">
+    <section class="card admin-card">
+      <h2>Security events (últimos 200)</h2>
+      <p class="subtle">Administrador: <strong><%= adminUser %></strong></p>
+      <p class="subtle"><a href="/admin/sessions">Sessões</a> · <a href="/admin/auth-events">Auth events</a></p>
+
+      <div class="table-wrap">
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>Quando</th><th>Evento</th><th>Severidade</th><th>Correlação</th><th>Motivo</th><th>Tentativas</th><th>Janela(s)</th><th>Bloqueado até</th>
+            </tr>
+          </thead>
+          <tbody>
+            <% (events || []).forEach((event) => { %>
+              <tr>
+                <td><%= event.created_at_label %></td>
+                <td title="<%= event.event_type %>"><%= event.event_label %></td>
+                <td><%= event.severity %></td>
+                <td class="truncate" title="<%= event.correlation_type %>:<%= event.correlation_value %>"><%= event.correlation_type %>:<%= event.correlation_value %></td>
+                <td class="truncate" title="<%= event.reason || event.description || '-' %>"><%= event.reason || event.description || '-' %></td>
+                <td><%= event.attempt_count || '-' %></td>
+                <td><%= event.window_seconds || '-' %></td>
+                <td><%= event.blocked_until_label || '-' %></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
