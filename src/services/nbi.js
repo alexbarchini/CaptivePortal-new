@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { logInfo } = require('../utils/logger');
+const { resolveNbiMode, isMockMode, validateNbiConfigOrThrow } = require('./nbiConfig');
 
 const REQUEST_TIMEOUT_MS = 5000;
 
@@ -44,9 +45,13 @@ function isFail(data) {
 }
 
 async function loginAndPoll({ ueIp, ueMac, ueProxy = '0', ueUsername, uePassword, redirectParams }) {
-  if (process.env.NBI_MOCK === 'true' || redirectParams.mock === '1') {
+  const nbiMode = resolveNbiMode();
+  logInfo('nbi_authorization_mode', { mode: nbiMode, operation: 'legacy_login_and_poll' });
+  if (isMockMode()) {
     return { success: true, mode: 'mock', detail: { message: 'NBI mock habilitado.' } };
   }
+
+  validateNbiConfigOrThrow();
 
   const endpoint = getNbiTarget(redirectParams);
   const loginPayload = {
