@@ -67,6 +67,8 @@
       <% if (error) { %>
         <div class="alert error"><%= error %></div>
       <% } %>
+      <div class="admin-toast" data-admin-toast hidden role="status" aria-live="polite"></div>
+
 
       <% if (!error) { %>
         <h3>Sessões recentes (até 50 por página)</h3>
@@ -92,6 +94,7 @@
                   <th class="col-vlan">VLAN</th>
                   <th class="col-apip">AP IP</th>
                   <th>Dispositivo</th>
+                  <th class="col-actions">Ações</th>
                 </tr>
               </thead>
               <tbody>
@@ -109,6 +112,20 @@
                     <td><%= session.vlan || '-' %></td>
                     <td class="truncate" title="<%= session.apip || '-' %>"><%= session.apip || '-' %></td>
                     <td class="truncate" title="<%= session.device_display_name %>"><%= session.device_display_name %></td>
+                    <td>
+                      <% if (String(session.status || '').toUpperCase() === 'OPEN') { %>
+                        <button
+                          type="button"
+                          class="terminate-session-btn"
+                          data-terminate-session
+                          data-session-id="<%= session.lsid %>"
+                        >
+                          Encerrar
+                        </button>
+                      <% } else { %>
+                        <span class="subtle">-</span>
+                      <% } %>
+                    </td>
                   </tr>
                 <% }) %>
               </tbody>
@@ -138,6 +155,66 @@
           }
         });
       }
+
+
+      const toastEl = document.querySelector('[data-admin-toast]');
+      const showToast = (message) => {
+        if (!toastEl) return;
+        toastEl.textContent = message;
+        toastEl.hidden = false;
+        window.clearTimeout(showToast.timeoutId);
+        showToast.timeoutId = window.setTimeout(() => {
+          toastEl.hidden = true;
+        }, 2400);
+      };
+
+      const terminateButtons = document.querySelectorAll('[data-terminate-session]');
+      terminateButtons.forEach((button) => {
+        button.addEventListener('click', async () => {
+          const sessionId = button.getAttribute('data-session-id') || '';
+          if (!sessionId) return;
+
+          const confirmed = window.confirm('Tem certeza que deseja encerrar esta sessão do usuário?');
+          if (!confirmed) return;
+
+          const originalLabel = button.textContent;
+          button.disabled = true;
+          button.classList.add('is-loading');
+          button.textContent = 'Encerrando...';
+
+          try {
+            const response = await fetch(`/admin/sessions/${encodeURIComponent(sessionId)}/terminate`, {
+              method: 'POST',
+              headers: {
+                'Accept': 'application/json'
+              }
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok || !payload?.ok) {
+              throw new Error(payload?.error || 'Falha ao encerrar sessão.');
+            }
+
+            const row = button.closest('tr');
+            const statusPill = row ? row.querySelector('.status-pill') : null;
+            if (statusPill) {
+              statusPill.textContent = 'CLOSED';
+              statusPill.classList.remove('status-open', 'status-pending', 'status-authorized');
+              statusPill.classList.add('status-closed');
+            }
+
+            const actionCell = button.parentElement;
+            if (actionCell) {
+              actionCell.innerHTML = '<span class="subtle">-</span>';
+            }
+            showToast('Sessão encerrada com sucesso.');
+          } catch (error) {
+            button.disabled = false;
+            button.classList.remove('is-loading');
+            button.textContent = originalLabel;
+            window.alert(error?.message || 'Falha ao encerrar sessão.');
+          }
+        });
+      });
 
       const topScroll = document.querySelector('[data-top-scrollbar]');
       const topInner = document.querySelector('[data-top-scrollbar-inner]');

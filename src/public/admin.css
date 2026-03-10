@@ -250,3 +250,31 @@
     width: 100%;
   }
 }
+
+
+.col-actions { width: 120px; }
+
+.terminate-session-btn {
+  margin: 0;
+  width: auto;
+  min-width: 92px;
+  padding: 6px 10px;
+  font-size: 0.78rem;
+  line-height: 1.1;
+  background: var(--danger);
+}
+
+.terminate-session-btn.is-loading {
+  opacity: 0.8;
+  cursor: progress;
+}
+
+.admin-toast {
+  margin: 8px 0 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #dcfce7;
+  color: #14532d;
+  border: 1px solid #86efac;
+  font-size: 0.9rem;
+}
