@@ -13,7 +13,7 @@
     <section class="card admin-card">
       <h2>Security Events</h2>
       <p class="subtle">Administrador: <strong><%= adminUser %></strong></p>
-      <p class="subtle"><a href="/admin/sessions">Sessões</a> · <a href="/admin/security-events">Security Events</a> · <a href="/admin/auth-failures">Auth Failures</a></p>
+      <%- include('partials/admin_navigation', { activeTab: 'security-events' }) %>
 
       <form method="get" action="/admin/security-events" class="admin-filters">
         <div class="filter-field">

@@ -13,7 +13,7 @@
     <section class="card admin-card">
       <h2>Consulta administrativa</h2>
       <p class="subtle">Administrador: <strong><%= adminUser %></strong></p>
-      <p class="subtle"><a href="/admin/auth-failures">Auth Failures</a> · <a href="/admin/security-events">Security events</a></p>
+      <%- include('partials/admin_navigation', { activeTab: 'sessions' }) %>
 
       <form method="get" action="/admin/sessions" class="admin-filters">
         <div class="filter-field">
