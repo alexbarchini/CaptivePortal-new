@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= title %></title>
+  <link rel="stylesheet" href="/public/style.css" />
+  <link rel="stylesheet" href="/public/admin.css" />
+</head>
+<body>
+  <%- include('partials/admin_header', { showLogout: true, pageTitle: 'Administração · Auth events' }) %>
+  <main class="admin-shell">
+    <section class="card admin-card">
+      <h2>Auth events (últimos 200)</h2>
+      <p class="subtle">Administrador: <strong><%= adminUser %></strong></p>
+      <p class="subtle"><a href="/admin/sessions">Sessões</a> · <a href="/admin/security-events">Security events</a></p>
+
+      <div class="table-wrap">
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>Quando</th><th>Evento</th><th>CPF</th><th>User ID</th><th>LSID</th><th>IP</th><th>MAC</th><th>Detalhes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <% (events || []).forEach((event) => { %>
+              <tr>
+                <td><%= event.created_at_label %></td>
+                <td title="<%= event.event_type %>"><%= event.event_label %></td>
+                <td><%= event.cpf || '-' %></td>
+                <td><%= event.user_id || '-' %></td>
+                <td class="truncate" title="<%= event.lsid || '-' %>"><%= event.lsid || '-' %></td>
+                <td><%= event.client_ip || '-' %></td>
+                <td><%= event.client_mac || '-' %></td>
+                <td class="truncate" title="<%= JSON.stringify(event.details_json || {}) %>"><%= JSON.stringify(event.details_json || {}) %></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

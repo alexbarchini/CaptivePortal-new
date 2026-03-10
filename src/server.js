@@ -34,6 +34,12 @@ const OTP_TTL_SECONDS = Number(process.env.OTP_TTL_SECONDS || 300);
 const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS || 5);
 const OTP_RESEND_COOLDOWN_SECONDS = Number(process.env.OTP_RESEND_COOLDOWN_SECONDS || 60);
 const OTP_VALID_REUSE_WINDOW_SECONDS = Number(process.env.OTP_VALID_REUSE_WINDOW_SECONDS || 120);
+const OTP_SEND_WINDOW_SECONDS = Number(process.env.OTP_SEND_WINDOW_SECONDS || 600);
+const OTP_SEND_MAX_PER_WINDOW = Number(process.env.OTP_SEND_MAX_PER_WINDOW || 3);
+const OTP_SEND_BLOCK_SECONDS = Number(process.env.OTP_SEND_BLOCK_SECONDS || 900);
+const OTP_INVALID_WINDOW_SECONDS = Number(process.env.OTP_INVALID_WINDOW_SECONDS || 600);
+const OTP_INVALID_MAX_PER_WINDOW = Number(process.env.OTP_INVALID_MAX_PER_WINDOW || 5);
+const OTP_INVALID_BLOCK_SECONDS = Number(process.env.OTP_INVALID_BLOCK_SECONDS || 900);
 const LOGIN_SESSION_TTL_SECONDS = Number(process.env.LOGIN_SESSION_TTL_SECONDS || 600);
 const ADMIN_SESSION_COOKIE_NAME = 'admin_session';
 const ADMIN_SESSION_TTL_MS = Number(process.env.ADMIN_SESSION_TTL_HOURS || 8) * 60 * 60 * 1000;
@@ -995,6 +1001,18 @@ async function resolvePreferredLsid(req, providedLsid = '') {
 }
 
 async function sendOtpForUser({ userId, phoneE164, reason, ueIp = null, ueMac = null, lsid = null }) {
+  const userQuery = await pool.query(`SELECT cpf_normalizado FROM users WHERE id = $1`, [userId]);
+  const cpf = userQuery.rows[0]?.cpf_normalizado || null;
+  const otpLimit = await checkOtpSendRateLimit({ cpf, userId, lsid, clientIp: ueIp, clientMac: ueMac });
+  if (!otpLimit.allowed) {
+    throw new AuthFlowError(
+      'Limite de envio de OTP excedido.',
+      otpLimit.userMessage,
+      429,
+      'otp_send_rate_limited'
+    );
+  }
+
   const code = String(Math.floor(100000 + Math.random() * 900000));
   const codeHash = await argon2.hash(code);
 
@@ -1006,7 +1024,178 @@ async function sendOtpForUser({ userId, phoneE164, reason, ueIp = null, ueMac = 
     [userId, lsid, phoneE164, codeHash, OTP_TTL_SECONDS, ueIp, normalizeMacIfPlain(ueMac)]
   );
 
+  await recordAuthEvent({
+    eventType: reason === 'resend' ? 'otp_resend' : 'otp_sent',
+    lsid,
+    userId,
+    cpf,
+    clientMac: ueMac,
+    clientIp: ueIp,
+    details: { reason, channel: 'sms' }
+  });
+
   logInfo('otp_sent', { lsid, user_id: userId, destination: phoneE164, reason, ue_ip: ueIp, ue_mac: maskMac(ueMac) });
+}
+
+function buildRateLimitFriendlyMessage() {
+  return 'Muitas tentativas de envio de código. Aguarde alguns minutos para tentar novamente.';
+}
+
+function buildOtpInvalidFriendlyMessage() {
+  return 'Muitas tentativas inválidas de código. Aguarde alguns minutos antes de tentar novamente.';
+}
+
+async function recordAuthEvent({ eventType, lsid = null, userId = null, cpf = null, clientMac = null, clientIp = null, ssid = null, apIp = null, vlan = null, userAgent = null, details = null }) {
+  await pool.query(
+    `INSERT INTO auth_events (event_type, lsid, user_id, cpf, client_mac, client_ip, ssid, ap_ip, vlan, user_agent, details_json, login_session_id, status, detail)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $2, 'info', $11::jsonb)`,
+    [eventType, lsid, userId, cpf, normalizeMacIfPlain(clientMac), normalizeClientIp(clientIp), ssid, apIp, vlan, userAgent, JSON.stringify(details || {})]
+  );
+}
+
+async function recordSecurityEvent({ eventType, severity = 'medium', correlationType, correlationValue, description, reason, attemptCount = null, windowSeconds = null, blockedUntil = null, details = null }) {
+  await pool.query(
+    `INSERT INTO security_events (event_type, severity, correlation_type, correlation_value, description, reason, attempt_count, window_seconds, blocked_until, details_json)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
+    [eventType, severity, correlationType, correlationValue, description, reason, attemptCount, windowSeconds, blockedUntil, JSON.stringify(details || {})]
+  );
+}
+
+async function getActiveSecurityBlock(correlationType, correlationValue, eventType) {
+  if (!correlationValue) return null;
+  const result = await pool.query(
+    `SELECT *
+     FROM security_events
+     WHERE correlation_type = $1
+       AND correlation_value = $2
+       AND event_type = $3
+       AND blocked_until IS NOT NULL
+       AND blocked_until > NOW()
+     ORDER BY blocked_until DESC, created_at DESC
+     LIMIT 1`,
+    [correlationType, correlationValue, eventType]
+  );
+  return result.rows[0] || null;
+}
+
+async function checkOtpSendRateLimit({ cpf, userId, lsid = null, clientIp = null, clientMac = null }) {
+  if (!cpf) return { allowed: true, userMessage: null };
+
+  const activeBlock = await getActiveSecurityBlock('cpf', cpf, 'sms_abuse_suspected');
+  if (activeBlock) {
+    await recordAuthEvent({
+      eventType: 'sms_rate_limited',
+      lsid,
+      userId,
+      cpf,
+      clientIp,
+      clientMac,
+      details: {
+        reason: 'active_block',
+        blocked_until: activeBlock.blocked_until,
+        window_seconds: OTP_SEND_WINDOW_SECONDS,
+        attempt_count: activeBlock.attempt_count || OTP_SEND_MAX_PER_WINDOW
+      }
+    });
+    return { allowed: false, userMessage: buildRateLimitFriendlyMessage() };
+  }
+
+  const sendEvents = await pool.query(
+    `SELECT COUNT(*)::int AS attempt_count,
+            MAX(created_at) AS latest_attempt_at
+     FROM auth_events
+     WHERE cpf = $1
+       AND event_type IN ('otp_sent', 'otp_resend')
+       AND created_at >= NOW() - ($2::int * INTERVAL '1 second')`,
+    [cpf, OTP_SEND_WINDOW_SECONDS]
+  );
+
+  const attemptCount = sendEvents.rows[0]?.attempt_count || 0;
+  const latestAttemptAt = sendEvents.rows[0]?.latest_attempt_at;
+
+  if (latestAttemptAt) {
+    const cooldownResult = await pool.query(
+      `SELECT GREATEST(0, $2 - EXTRACT(EPOCH FROM (NOW() - $1::timestamptz))::int) AS wait_seconds`,
+      [latestAttemptAt, OTP_RESEND_COOLDOWN_SECONDS]
+    );
+    const waitSeconds = cooldownResult.rows[0]?.wait_seconds || 0;
+    if (waitSeconds > 0) {
+      await recordAuthEvent({
+        eventType: 'sms_rate_limited',
+        lsid,
+        userId,
+        cpf,
+        clientIp,
+        clientMac,
+        details: {
+          reason: 'cooldown_60_seconds',
+          wait_seconds: waitSeconds,
+          attempt_count: attemptCount,
+          window_seconds: OTP_SEND_WINDOW_SECONDS
+        }
+      });
+      return { allowed: false, userMessage: `Aguarde ${waitSeconds}s para solicitar um novo código.` };
+    }
+  }
+
+  if (attemptCount >= OTP_SEND_MAX_PER_WINDOW) {
+    const blockUntilResult = await pool.query(`SELECT NOW() + ($1::int * INTERVAL '1 second') AS blocked_until`, [OTP_SEND_BLOCK_SECONDS]);
+    const blockedUntil = blockUntilResult.rows[0]?.blocked_until || null;
+
+    await recordAuthEvent({
+      eventType: 'sms_rate_limited',
+      lsid,
+      userId,
+      cpf,
+      clientIp,
+      clientMac,
+      details: {
+        reason: 'max_3_in_10_minutes',
+        attempt_count: attemptCount,
+        window_seconds: OTP_SEND_WINDOW_SECONDS,
+        blocked_until: blockedUntil
+      }
+    });
+
+    await recordSecurityEvent({
+      eventType: 'sms_abuse_suspected',
+      severity: 'high',
+      correlationType: 'cpf',
+      correlationValue: cpf,
+      description: 'Muitas tentativas de envio/reenvio de OTP por CPF.',
+      reason: 'max 3 envios em 10 minutos',
+      attemptCount,
+      windowSeconds: OTP_SEND_WINDOW_SECONDS,
+      blockedUntil,
+      details: { cpf, user_id: userId, lsid, client_ip: normalizeClientIp(clientIp), client_mac: normalizeMacIfPlain(clientMac) }
+    });
+
+    return { allowed: false, userMessage: buildRateLimitFriendlyMessage() };
+  }
+
+  return { allowed: true, userMessage: null };
+}
+
+async function checkOtpInvalidBlock({ cpf, userId, lsid, clientIp, clientMac }) {
+  const activeBlock = await getActiveSecurityBlock('cpf', cpf, 'bruteforce_otp_suspected');
+  if (!activeBlock) return { blocked: false, blockedUntil: null };
+
+  await recordAuthEvent({
+    eventType: 'otp_validation_blocked',
+    lsid,
+    userId,
+    cpf,
+    clientIp,
+    clientMac,
+    details: {
+      reason: 'active_block',
+      blocked_until: activeBlock.blocked_until,
+      window_seconds: OTP_INVALID_WINDOW_SECONDS,
+      attempt_count: activeBlock.attempt_count || OTP_INVALID_MAX_PER_WINDOW
+    }
+  });
+
+  return { blocked: true, blockedUntil: activeBlock.blocked_until };
 }
 
 async function getLatestOtp(userId, lsid = null) {
@@ -1162,6 +1351,26 @@ app.get('/admin', (req, res) => {
   return res.redirect('/admin/sessions');
 });
 
+function mapAuthEventLabel(eventType = '') {
+  const labels = {
+    otp_sent: 'OTP enviado (primeiro envio)',
+    otp_resend: 'OTP reenviado',
+    sms_rate_limited: 'Envio de SMS limitado por proteção',
+    otp_invalid: 'Tentativa de OTP inválida',
+    otp_validation_blocked: 'Validação OTP bloqueada',
+    sms_otp_login: 'Tentativa de autorização após OTP'
+  };
+  return labels[eventType] || eventType;
+}
+
+function mapSecurityEventLabel(eventType = '') {
+  const labels = {
+    sms_abuse_suspected: 'Suspeita de abuso de envio SMS',
+    bruteforce_otp_suspected: 'Suspeita de brute force de OTP'
+  };
+  return labels[eventType] || eventType;
+}
+
 app.get('/admin/sessions', async (req, res) => {
   const cpfNormalized = cleanDigits(String(req.query.cpf || ''));
   const nameQuery = String(req.query.name || '').trim();
@@ -1305,6 +1514,37 @@ app.get('/admin/lookup', (req, res) => {
   const query = new URLSearchParams(req.query || {}).toString();
   return res.redirect(query ? `/admin/sessions?${query}` : '/admin/sessions');
 });
+
+app.get('/admin/auth-events', async (req, res) => {
+  const rows = await pool.query(
+    `SELECT id, created_at, event_type, lsid, user_id, cpf, client_ip, client_mac, details_json
+     FROM auth_events
+     ORDER BY created_at DESC
+     LIMIT 200`
+  );
+
+  return res.render('admin_auth_events', {
+    title: 'Administração · Auth events',
+    adminUser: req.adminSession.user,
+    events: rows.rows.map((event) => ({ ...event, event_label: mapAuthEventLabel(event.event_type), created_at_label: formatDateTime(event.created_at) }))
+  });
+});
+
+app.get('/admin/security-events', async (req, res) => {
+  const rows = await pool.query(
+    `SELECT id, created_at, event_type, severity, correlation_type, correlation_value, description, reason, attempt_count, window_seconds, blocked_until, details_json
+     FROM security_events
+     ORDER BY created_at DESC
+     LIMIT 200`
+  );
+
+  return res.render('admin_security_events', {
+    title: 'Administração · Security events',
+    adminUser: req.adminSession.user,
+    events: rows.rows.map((event) => ({ ...event, event_label: mapSecurityEventLabel(event.event_type), created_at_label: formatDateTime(event.created_at), blocked_until_label: formatDateTime(event.blocked_until) }))
+  });
+});
+
 app.post('/admin/logout', (req, res) => {
   res.clearCookie(ADMIN_SESSION_COOKIE_NAME, { httpOnly: true, sameSite: 'lax' });
   return res.redirect('/admin/login');
@@ -1608,6 +1848,17 @@ app.post('/login', async (req, res) => {
     return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
   } catch (error) {
     logError('login_attempt_failed', { ...requestContext, reason: error.reason || undefined, error });
+    if (error instanceof AuthFlowError && error.reason === 'otp_send_rate_limited') {
+      return res.status(429).render('verify_sms', {
+        title: 'Verificar SMS',
+        error: error.userMessage,
+        message: null,
+        lsid,
+        maskedPhone: '',
+        resendWaitSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+        contextBadge: buildContextBadge(params)
+      });
+    }
     return genericInvalidCredentials(res, lsid, error.statusCode || 401);
   }
 });
@@ -1681,6 +1932,20 @@ app.post('/verify/sms/resend', async (req, res) => {
     return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
   } catch (error) {
     logError('otp_resend_failed', { lsid, error });
+    if (error instanceof AuthFlowError && error.reason === 'otp_send_rate_limited') {
+      if (expectsJson) {
+        return res.status(429).json({ success: false, error: error.userMessage });
+      }
+      return res.status(429).render('verify_sms', {
+        title: 'Verificar SMS',
+        error: error.userMessage,
+        message: null,
+        lsid,
+        maskedPhone: '',
+        resendWaitSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+        contextBadge: null
+      });
+    }
     if (expectsJson) {
       return res.status(500).json({ success: false, error: 'Falha ao reenviar SMS. Tente novamente em instantes.', temporary_retry_after_seconds: 4 });
     }
@@ -1730,6 +1995,19 @@ async function verifySmsHandler(req, res) {
     if (session.authorized_at || session.consumed_at) return res.redirect(getOriginalUrl(sessionCtx));
     if (new Date(session.expires_at) < new Date()) throw new AuthFlowError('Sessão inválida.', 'Sessão do captive expirada, volte e conecte novamente ao Wi-Fi', 400);
 
+    const wispr = resolveWisprParams(sessionCtx);
+    const cpf = session.cpf_normalizado || null;
+    const blockedValidation = await checkOtpInvalidBlock({
+      cpf,
+      userId: session.user_id,
+      lsid: session.id,
+      clientIp: wispr.userIp,
+      clientMac: wispr.userMac
+    });
+    if (blockedValidation.blocked) {
+      throw new AuthFlowError('Validação OTP bloqueada.', buildOtpInvalidFriendlyMessage(), 429, 'otp_validation_blocked');
+    }
+
     const otp = await getLatestOtp(session.user_id, session.id);
     if (!otp || otp.verified_at || otp.blocked_at || new Date(otp.expires_at) < new Date()) {
       throw new AuthFlowError('OTP inválido.', 'Código inválido ou expirado.');
@@ -1748,6 +2026,98 @@ async function verifySmsHandler(req, res) {
 
     const otpOk = await argon2.verify(otp.code_hash, code);
     if (!otpOk) {
+      await recordAuthEvent({
+        eventType: 'otp_invalid',
+        lsid: session.id,
+        userId: session.user_id,
+        cpf,
+        clientIp: wispr.userIp,
+        clientMac: wispr.userMac,
+        ssid: session.ssid,
+        apIp: session.apip,
+        vlan: session.vlan,
+        userAgent: req.get('user-agent') || '',
+        details: {
+          reason: 'otp_mismatch',
+          attempt_count: attempts,
+          window_seconds: OTP_INVALID_WINDOW_SECONDS
+        }
+      });
+
+      const invalidWindowCountQuery = await pool.query(
+        `SELECT COUNT(*)::int AS attempt_count
+         FROM auth_events
+         WHERE cpf = $1
+           AND event_type = 'otp_invalid'
+           AND created_at >= NOW() - ($2::int * INTERVAL '1 second')`,
+        [cpf, OTP_INVALID_WINDOW_SECONDS]
+      );
+      const invalidAttemptCount = invalidWindowCountQuery.rows[0]?.attempt_count || 0;
+
+      const invalidByLsidQuery = await pool.query(
+        `SELECT COUNT(*)::int AS attempt_count
+         FROM auth_events
+         WHERE lsid = $1
+           AND event_type = 'otp_invalid'
+           AND created_at >= NOW() - ($2::int * INTERVAL '1 second')`,
+        [session.id, OTP_INVALID_WINDOW_SECONDS]
+      );
+      const invalidByLsidCount = invalidByLsidQuery.rows[0]?.attempt_count || 0;
+
+      if (invalidByLsidCount >= 3) {
+        await recordSecurityEvent({
+          eventType: 'bruteforce_otp_suspected',
+          severity: 'medium',
+          correlationType: 'lsid',
+          correlationValue: session.id,
+          description: 'Repetição de OTP inválido por LSID detectada.',
+          reason: 'repetição por lsid',
+          attemptCount: invalidByLsidCount,
+          windowSeconds: OTP_INVALID_WINDOW_SECONDS,
+          blockedUntil: null,
+          details: { cpf, user_id: session.user_id, lsid: session.id, client_ip: normalizeClientIp(wispr.userIp), client_mac: normalizeMacIfPlain(wispr.userMac) }
+        });
+      }
+
+      if (invalidAttemptCount >= OTP_INVALID_MAX_PER_WINDOW) {
+        const blockUntilResult = await pool.query(`SELECT NOW() + ($1::int * INTERVAL '1 second') AS blocked_until`, [OTP_INVALID_BLOCK_SECONDS]);
+        const blockedUntil = blockUntilResult.rows[0]?.blocked_until || null;
+
+        await recordAuthEvent({
+          eventType: 'otp_validation_blocked',
+          lsid: session.id,
+          userId: session.user_id,
+          cpf,
+          clientIp: wispr.userIp,
+          clientMac: wispr.userMac,
+          ssid: session.ssid,
+          apIp: session.apip,
+          vlan: session.vlan,
+          userAgent: req.get('user-agent') || '',
+          details: {
+            reason: '5 otp inválidos em 10 minutos',
+            attempt_count: invalidAttemptCount,
+            window_seconds: OTP_INVALID_WINDOW_SECONDS,
+            blocked_until: blockedUntil
+          }
+        });
+
+        await recordSecurityEvent({
+          eventType: 'bruteforce_otp_suspected',
+          severity: 'high',
+          correlationType: 'cpf',
+          correlationValue: cpf,
+          description: 'Tentativas inválidas repetidas de OTP por CPF.',
+          reason: '5 otp inválidos em 10 minutos',
+          attemptCount: invalidAttemptCount,
+          windowSeconds: OTP_INVALID_WINDOW_SECONDS,
+          blockedUntil,
+          details: { cpf, user_id: session.user_id, lsid: session.id, client_ip: normalizeClientIp(wispr.userIp), client_mac: normalizeMacIfPlain(wispr.userMac) }
+        });
+
+        throw new AuthFlowError('Validação OTP bloqueada.', buildOtpInvalidFriendlyMessage(), 429, 'otp_validation_blocked');
+      }
+
       logInfo('otp_verify_failed', { lsid: parsed.data.lsid, user_id: session.user_id, attempts });
       throw new AuthFlowError('OTP inválido.', 'Código inválido ou expirado.');
     }
@@ -1783,7 +2153,19 @@ async function verifySmsHandler(req, res) {
       cpf: session.cpf_normalizado
     });
 
-    await pool.query(`INSERT INTO auth_events (user_id, login_session_id, event_type, status, detail) VALUES ($1, $2, 'sms_otp_login', $3, $4::jsonb)`, [session.user_id, session.id, nbiResult.success ? 'success' : 'failed', JSON.stringify({ mode: nbiResult.mode, request_id: nbiResult.requestId || null })]);
+    await recordAuthEvent({
+      eventType: 'sms_otp_login',
+      lsid: session.id,
+      userId: session.user_id,
+      cpf: session.cpf_normalizado,
+      clientMac: session.client_mac,
+      clientIp: session.uip,
+      ssid: session.ssid,
+      apIp: session.apip,
+      vlan: session.vlan,
+      userAgent: req.get('user-agent') || '',
+      details: { mode: nbiResult.mode, request_id: nbiResult.requestId || null, success: nbiResult.success }
+    });
 
     if (!nbiResult.success) {
       logInfo('authorize_flow_failed', {
@@ -1863,12 +2245,15 @@ async function verifySmsHandler(req, res) {
       const maxSessionsResult = await enforceMaxOpenSessionsTx(client, session.user_id, session.id, 5);
       if (maxSessionsResult.enforced && maxSessionsResult.closedSession) {
         logInfo('max_active_sessions_enforced', {
+          event: 'max_active_sessions_enforced',
           user_id: session.user_id,
+          cpf: session.cpf_normalizado || null,
           new_session_id: session.id,
           closed_session_id: maxSessionsResult.closedSession.id,
           closed_session_authorized_at: maxSessionsResult.closedSession.authorized_at,
           active_count_before: maxSessionsResult.activeCountBefore,
-          active_count_after: maxSessionsResult.activeCountAfter
+          active_count_after: maxSessionsResult.activeCountAfter,
+          closed_reason: 'max_sessions_exceeded'
         });
       }
 
