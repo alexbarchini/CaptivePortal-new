@@ -38,8 +38,10 @@ const ADMIN_SESSION_COOKIE_NAME = 'admin_session';
 const ADMIN_SESSION_TTL_MS = Number(process.env.ADMIN_SESSION_TTL_HOURS || 8) * 60 * 60 * 1000;
 const ADMIN_ALLOWED_CIDRS = String(process.env.ADMIN_ALLOWED_CIDRS || '10.9.62.0/23').split(',').map((item) => item.trim()).filter(Boolean);
 const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_PASSWORD_HASH || 'admin-session-secret';
+const PORTAL_CAPTURE_REPEAT_WINDOW_MS = Number(process.env.PORTAL_CAPTURE_REPEAT_WINDOW_MS || 120000);
 const smsProvider = buildSmsProvider();
 const DISPLAY_TIME_ZONE = 'America/Sao_Paulo';
+const portalCaptureTracker = new Map();
 function parseSmartZoneManagementIps(rawValue = '') {
   return [...new Set(
     String(rawValue || '')
@@ -638,16 +640,95 @@ async function findAuthorizedLoginSessionByWispr({ userIp = '', userMac = '' }) 
   return query.rows[0] || null;
 }
 
+async function findOpenLoginSessionByMac(clientMac = '') {
+  const normalizedMac = normalizeMacIfPlain(clientMac);
+  if (!normalizedMac) return null;
+
+  const query = await pool.query(
+    `SELECT id, status, authorized_at, client_mac
+     FROM login_sessions
+     WHERE client_mac = $1
+       AND status = 'OPEN'
+     ORDER BY COALESCE(authorized_at, created_at) DESC
+     LIMIT 1`,
+    [normalizedMac]
+  );
+  return query.rows[0] || null;
+}
+
+function sanitizeSmartZoneStatusDetail(detail = {}) {
+  if (!detail || typeof detail !== 'object') return null;
+  return {
+    ResponseCode: detail.ResponseCode || null,
+    ReplyMessage: String(detail.ReplyMessage || ''),
+    AccessAccept: detail.AccessAccept || null,
+    ChallengeState: detail.ChallengeState || null
+  };
+}
+
+function buildPortalAuthorizationDecisionLog({
+  decision,
+  source,
+  lsid = null,
+  originalMac = '',
+  normalizedMac = '',
+  clientIp = '',
+  openSession = null,
+  extras = {}
+} = {}) {
+  return {
+    decision,
+    source,
+    lsid,
+    client_mac_original: originalMac || null,
+    client_mac_normalized: normalizedMac || null,
+    client_ip: clientIp || null,
+    has_open_session_same_mac: Boolean(openSession),
+    open_session_id: openSession?.id || null,
+    open_session_authorized_at: openSession?.authorized_at || null,
+    open_session_status: openSession?.status || null,
+    ...extras
+  };
+}
+
 async function resolvePortalStatusFromWispr(ctx = {}) {
   const wispr = resolveWisprParams(ctx);
   const normalizedIp = normalizeClientIp(wispr.userIp);
   const normalizedMac = normalizeMacIfPlain(wispr.userMac);
+  const localOpenSession = normalizedMac ? await findOpenLoginSessionByMac(normalizedMac) : null;
+
+  const lookupLogBase = {
+    lsid: null,
+    client_ip: normalizedIp || null,
+    client_mac_original: wispr.userMac || null,
+    client_mac_normalized: normalizedMac || null,
+    local_open_session_found: Boolean(localOpenSession),
+    local_open_session_id: localOpenSession?.id || null,
+    local_open_session_status: localOpenSession?.status || null,
+    local_open_session_authorized_at: localOpenSession?.authorized_at || null
+  };
 
   if (!normalizedIp || !normalizedMac) {
+    logInfo('portal_authorization_lookup', {
+      ...lookupLogBase,
+      smartzone_consulted: false,
+      smartzone_raw: null,
+      smartzone_sanitized: null,
+      decision_rule: 'missing_required_wispr'
+    });
     return { authorized: false, reason: 'missing_required_wispr' };
   }
 
   const dbSession = await findAuthorizedLoginSessionByWispr({ userIp: normalizedIp, userMac: normalizedMac });
+  if (!dbSession) {
+    logInfo('portal_authorization_lookup', {
+      ...lookupLogBase,
+      smartzone_consulted: false,
+      smartzone_raw: null,
+      smartzone_sanitized: null,
+      decision_rule: 'no_authorized_open_session_for_mac'
+    });
+  }
 
   if (dbSession) {
     try {
@@ -660,36 +741,72 @@ async function resolvePortalStatusFromWispr(ctx = {}) {
         uePassword: dbSession.login_password || undefined
       }));
       const nbiResult = pick.result;
+      const sanitizedDetail = sanitizeSmartZoneStatusDetail(nbiResult.detail);
+      const lookupRule = (nbiResult.success && nbiResult.authorized)
+        ? 'authorized_when_local_open_session_and_smartzone_confirms'
+        : 'unauthorized_when_local_open_session_but_smartzone_denies_or_unconfirmed';
+
+      logInfo('portal_authorization_lookup', {
+        ...lookupLogBase,
+        lsid: dbSession.id,
+        smartzone_consulted: true,
+        smartzone_raw: nbiResult.detail || null,
+        smartzone_sanitized: sanitizedDetail,
+        smartzone_success: Boolean(nbiResult.success),
+        smartzone_authorized: Boolean(nbiResult.authorized),
+        smartzone_unconfirmed: Boolean(nbiResult.unconfirmed),
+        decision_rule: lookupRule
+      });
 
       const responseCode = String(nbiResult.detail?.ResponseCode || '');
       if (nbiResult.success && nbiResult.authorized) {
-        logInfo('portal_authorization_decision', {
+        logInfo('portal_authorization_decision', buildPortalAuthorizationDecisionLog({
           decision: 'authorized',
           source: 'nbi_status',
+          lsid: dbSession.id,
+          originalMac: wispr.userMac,
+          normalizedMac,
+          clientIp: normalizedIp,
+          openSession: localOpenSession,
+          extras: {
+            response_code: responseCode,
+            auth_state_key: nbiResult.authStateKey || null,
+            auth_state_value: nbiResult.authStateValue || null,
+            unconfirmed: Boolean(nbiResult.unconfirmed),
+            authorization_reason: nbiResult.authorizationReason || null,
+            reply_message: String(nbiResult.detail?.ReplyMessage || ''),
+            ue_mac_masked: maskMac(normalizedMac)
+          }
+        }));
+        return { authorized: true, source: 'nbi_status', responseCode, session: dbSession };
+      }
+
+      logInfo('portal_authorization_decision', buildPortalAuthorizationDecisionLog({
+        decision: 'unauthorized',
+        source: 'nbi_status',
+        lsid: dbSession.id,
+        originalMac: wispr.userMac,
+        normalizedMac,
+        clientIp: normalizedIp,
+        openSession: localOpenSession,
+        extras: {
           response_code: responseCode,
           auth_state_key: nbiResult.authStateKey || null,
           auth_state_value: nbiResult.authStateValue || null,
           unconfirmed: Boolean(nbiResult.unconfirmed),
-          authorization_reason: nbiResult.authorizationReason || null,
           reply_message: String(nbiResult.detail?.ReplyMessage || ''),
-          ue_ip: normalizedIp,
-          ue_mac: maskMac(normalizedMac)
-        });
-        return { authorized: true, source: 'nbi_status', responseCode, session: dbSession };
-      }
-
-      logInfo('portal_authorization_decision', {
-        decision: 'unauthorized',
-        source: 'nbi_status',
-        response_code: responseCode,
-        auth_state_key: nbiResult.authStateKey || null,
-        auth_state_value: nbiResult.authStateValue || null,
-        unconfirmed: Boolean(nbiResult.unconfirmed),
-        reply_message: String(nbiResult.detail?.ReplyMessage || ''),
-        ue_ip: normalizedIp,
-        ue_mac: maskMac(normalizedMac)
-      });
+          ue_mac_masked: maskMac(normalizedMac)
+        }
+      }));
     } catch (error) {
+      logInfo('portal_authorization_lookup', {
+        ...lookupLogBase,
+        lsid: dbSession.id,
+        smartzone_consulted: true,
+        smartzone_raw: null,
+        smartzone_sanitized: null,
+        decision_rule: 'smartzone_lookup_failed'
+      });
       logError('portal_status_nbi_failed', {
         ue_ip: normalizedIp,
         ue_mac: maskMac(normalizedMac),
@@ -781,11 +898,38 @@ async function createPortalSession(req, params) {
   logInfo('portal_ctx_captured', {
     lsid,
     params: sanitizeParams(ctx),
+    client_ip: normalizeClientIp(ctx.uip),
+    client_mac_original: ctx.client_mac || null,
+    client_mac_normalized: normalizedClientMac || null,
     smartzone_host_resolved: hostResolution.host || null,
     smartzone_host_source: hostResolution.source,
     allowlist: SMARTZONE_ALLOWLIST,
     fallback_trail: hostResolution.fallbackTrail
   });
+
+  const trackingKey = `${normalizeClientIp(ctx.uip)}|${normalizedClientMac}`;
+  if (normalizedClientMac && normalizeClientIp(ctx.uip)) {
+    const previous = portalCaptureTracker.get(trackingKey);
+    const now = Date.now();
+    const withinWindow = previous && (now - previous.lastSeenAtMs) <= PORTAL_CAPTURE_REPEAT_WINDOW_MS;
+    if (withinWindow) {
+      const captureCount = previous.captureCount + 1;
+      portalCaptureTracker.set(trackingKey, { captureCount, lastSeenAtMs: now });
+      if (captureCount === 2 || captureCount % 5 === 0) {
+        logInfo('portal_ctx_capture_repeated_expected', {
+          behavior: 'expected_repeated_capture_for_unauthenticated_client',
+          client_ip: normalizeClientIp(ctx.uip),
+          client_mac_original: ctx.client_mac || null,
+          client_mac_normalized: normalizedClientMac,
+          captures_in_window: captureCount,
+          window_ms: PORTAL_CAPTURE_REPEAT_WINDOW_MS,
+          latest_lsid: lsid
+        });
+      }
+    } else {
+      portalCaptureTracker.set(trackingKey, { captureCount: 1, lastSeenAtMs: now });
+    }
+  }
   return lsid;
 }
 
@@ -1151,16 +1295,25 @@ app.get('/portal', async (req, res) => {
   try {
     const wisprCtx = pickWisprParams(req.query);
     if (hasRequiredWispr(wisprCtx)) {
+      const normalizedWisprIp = normalizeClientIp(wisprCtx.uip);
+      const normalizedWisprMac = normalizeMacIfPlain(wisprCtx.client_mac);
+      const openSessionByMac = normalizedWisprMac ? await findOpenLoginSessionByMac(normalizedWisprMac) : null;
       const status = await resolvePortalStatusFromWispr(wisprCtx);
       if (status.authorized && status.session) {
-        logInfo('portal_authorization_decision', {
+        logInfo('portal_authorization_decision', buildPortalAuthorizationDecisionLog({
           decision: 'authorized',
           source: status.source,
-          response_code: status.responseCode || null,
-          ue_ip: wisprCtx.uip,
-          ue_mac: maskMac(wisprCtx.client_mac),
-          nbi_ip: wisprCtx.nbiIP
-        });
+          lsid: status.session.id,
+          originalMac: wisprCtx.client_mac,
+          normalizedMac: normalizedWisprMac,
+          clientIp: normalizedWisprIp,
+          openSession: openSessionByMac,
+          extras: {
+            response_code: status.responseCode || null,
+            nbi_ip: wisprCtx.nbiIP,
+            ue_mac_masked: maskMac(wisprCtx.client_mac)
+          }
+        }));
         return renderConnectedStatus(res, status.session, wisprCtx);
       }
 
@@ -1170,13 +1323,19 @@ app.get('/portal', async (req, res) => {
         httpOnly: true,
         sameSite: 'lax'
       });
-      logInfo('portal_authorization_decision', {
+      logInfo('portal_authorization_decision', buildPortalAuthorizationDecisionLog({
         decision: 'unauthorized',
         source: status.source || status.reason || 'no_session',
-        ue_ip: wisprCtx.uip,
-        ue_mac: maskMac(wisprCtx.client_mac),
-        nbi_ip: wisprCtx.nbiIP
-      });
+        lsid,
+        originalMac: wisprCtx.client_mac,
+        normalizedMac: normalizedWisprMac,
+        clientIp: normalizedWisprIp,
+        openSession: openSessionByMac,
+        extras: {
+          nbi_ip: wisprCtx.nbiIP,
+          ue_mac_masked: maskMac(wisprCtx.client_mac)
+        }
+      }));
       return res.render('portal', {
         title: 'Portal Visitantes TRT9',
         error: null,
