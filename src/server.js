@@ -1723,6 +1723,190 @@ app.get('/admin/sessions', async (req, res) => {
   });
 });
 
+app.post('/admin/sessions/:lsid/terminate', async (req, res) => {
+  const lsid = String(req.params.lsid || '').trim();
+  const adminUser = String(req.adminSession?.user || '').trim();
+  const adminIp = normalizeClientIp(req.ip) || String(req.ip || '').trim() || null;
+
+  if (!lsid) {
+    return res.status(400).json({ ok: false, error: 'Sessão inválida.' });
+  }
+
+  const client = await pool.connect();
+  let session = null;
+  try {
+    await client.query('BEGIN');
+
+    const sessionQuery = await client.query(
+      `SELECT ls.id,
+              ls.user_id,
+              ls.status,
+              ls.uip,
+              ls.client_mac,
+              ls.nbi_ip,
+              ls.proxy,
+              ls.wlan_name,
+              ls.apip,
+              u.cpf_normalizado,
+              u.username_radius
+       FROM login_sessions ls
+       JOIN users u ON u.id = ls.user_id
+       WHERE ls.id = $1
+       FOR UPDATE`,
+      [lsid]
+    );
+
+    session = sessionQuery.rows[0] || null;
+    if (!session) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'Sessão não encontrada.' });
+    }
+
+    if (session.status !== 'OPEN') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'Apenas sessões OPEN podem ser encerradas manualmente.' });
+    }
+
+    await client.query(
+      `UPDATE login_sessions
+       SET status = 'CLOSED',
+           closed_at = NOW(),
+           consumed_at = COALESCE(consumed_at, NOW()),
+           closed_reason = 'admin_terminated_session'
+       WHERE id = $1`,
+      [session.id]
+    );
+
+    const auditDetails = {
+      session_id: session.id,
+      user_id: session.user_id,
+      cpf: session.cpf_normalizado || null,
+      client_ip: session.uip || null,
+      client_mac: session.client_mac || null,
+      admin_user: adminUser || null,
+      admin_ip: adminIp,
+      reason: 'admin manual termination'
+    };
+
+    await client.query(
+      `INSERT INTO auth_events (event_type, lsid, user_id, cpf, client_mac, client_ip, details_json, login_session_id, status, detail)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $2, 'info', $7::jsonb)`,
+      [
+        'admin_session_terminated',
+        session.id,
+        session.user_id,
+        session.cpf_normalizado,
+        normalizeMacIfPlain(session.client_mac),
+        normalizeClientIp(session.uip),
+        JSON.stringify(auditDetails)
+      ]
+    );
+
+    await client.query(
+      `INSERT INTO security_events (event_type, severity, correlation_type, correlation_value, description, reason, details_json)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+      [
+        'admin_session_forced_disconnect',
+        'info',
+        session.cpf_normalizado ? 'cpf' : (session.client_mac ? 'mac' : 'ip'),
+        session.cpf_normalizado || normalizeMacIfPlain(session.client_mac) || normalizeClientIp(session.uip),
+        'Sessão encerrada manualmente pelo administrador',
+        'admin manual termination',
+        JSON.stringify(auditDetails)
+      ]
+    );
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    logError('admin_terminate_session_failed', { lsid, admin_user: adminUser || null, admin_ip: adminIp, error });
+    return res.status(500).json({ ok: false, error: 'Falha ao encerrar sessão.' });
+  } finally {
+    client.release();
+  }
+
+  const disconnectAuditDetails = {
+    session_id: session.id,
+    user_id: session.user_id,
+    cpf: session.cpf_normalizado || null,
+    client_ip: session.uip || null,
+    client_mac: session.client_mac || null,
+    wlan_name: session.wlan_name || null,
+    ap_ip: session.apip || null,
+    admin_user: adminUser || null,
+    admin_ip: adminIp,
+    reason: 'admin manual termination'
+  };
+
+  try {
+    await recordSecurityEvent({
+      eventType: 'controller_disconnect_request',
+      severity: 'info',
+      correlationType: session.cpf_normalizado ? 'cpf' : (session.client_mac ? 'mac' : 'ip'),
+      correlationValue: session.cpf_normalizado || normalizeMacIfPlain(session.client_mac) || normalizeClientIp(session.uip),
+      description: 'Solicitação de desconexão enviada à controladora SmartZone.',
+      reason: 'admin manual termination',
+      details: disconnectAuditDetails
+    });
+
+    if (!session.nbi_ip || !session.client_mac || !session.uip) {
+      await recordSecurityEvent({
+        eventType: 'controller_disconnect_failed',
+        severity: 'info',
+        correlationType: session.cpf_normalizado ? 'cpf' : (session.client_mac ? 'mac' : 'ip'),
+        correlationValue: session.cpf_normalizado || normalizeMacIfPlain(session.client_mac) || normalizeClientIp(session.uip),
+        description: 'Falha ao desconectar sessão na controladora SmartZone.',
+        reason: 'missing_controller_context',
+        details: disconnectAuditDetails
+      });
+      return res.status(200).json({ ok: true, session: { id: session.id, status: 'CLOSED' }, disconnect: { success: false, reason: 'missing_controller_context' } });
+    }
+
+    const disconnectResult = await disconnectAsync({
+      nbiIP: session.nbi_ip,
+      ueIp: session.uip,
+      ueMac: session.client_mac,
+      proxy: session.proxy || '0',
+      ueUsername: session.username_radius || `visitante_${session.cpf_normalizado || ''}`
+    });
+
+    const eventType = disconnectResult.success ? 'controller_disconnect_success' : 'controller_disconnect_failed';
+    await recordSecurityEvent({
+      eventType,
+      severity: 'info',
+      correlationType: session.cpf_normalizado ? 'cpf' : (session.client_mac ? 'mac' : 'ip'),
+      correlationValue: session.cpf_normalizado || normalizeMacIfPlain(session.client_mac) || normalizeClientIp(session.uip),
+      description: disconnectResult.success
+        ? 'Desconexão confirmada pela controladora SmartZone.'
+        : 'Falha ao desconectar sessão na controladora SmartZone.',
+      reason: disconnectResult.success ? 'controller disconnect success' : 'controller disconnect failed',
+      details: {
+        ...disconnectAuditDetails,
+        request_id: disconnectResult.requestId || null,
+        response_code: String(disconnectResult.detail?.ResponseCode || ''),
+        reply_message: String(disconnectResult.detail?.ReplyMessage || '')
+      }
+    });
+
+    return res.status(200).json({ ok: true, session: { id: session.id, status: 'CLOSED' }, disconnect: { success: disconnectResult.success } });
+  } catch (error) {
+    await recordSecurityEvent({
+      eventType: 'controller_disconnect_failed',
+      severity: 'info',
+      correlationType: session.cpf_normalizado ? 'cpf' : (session.client_mac ? 'mac' : 'ip'),
+      correlationValue: session.cpf_normalizado || normalizeMacIfPlain(session.client_mac) || normalizeClientIp(session.uip),
+      description: 'Falha ao desconectar sessão na controladora SmartZone.',
+      reason: 'controller disconnect exception',
+      details: {
+        ...disconnectAuditDetails,
+        error: String(error?.message || error || 'unknown_error')
+      }
+    });
+    logError('admin_terminate_session_disconnect_failed', { lsid: session.id, admin_user: adminUser || null, admin_ip: adminIp, error });
+    return res.status(200).json({ ok: true, session: { id: session.id, status: 'CLOSED' }, disconnect: { success: false, reason: 'disconnect_exception' } });
+  }
+});
+
 
 app.get('/admin/lookup', (req, res) => {
   const query = new URLSearchParams(req.query || {}).toString();
