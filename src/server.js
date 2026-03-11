@@ -2314,7 +2314,11 @@ app.get('/admin/security-events', async (req, res) => {
     filters.push(sql.replace('?', `$${values.length}`));
   };
 
-  if (eventType) pushFilter('LOWER(event_type) = ?', eventType);
+  if (eventType) {
+    values.push(`%${eventType}%`);
+    const eventTypeFilterParam = `$${values.length}`;
+    filters.push(`(event_type ILIKE ${eventTypeFilterParam} OR COALESCE(description, '') ILIKE ${eventTypeFilterParam} OR COALESCE(reason, '') ILIKE ${eventTypeFilterParam})`);
+  }
   if (severity) pushFilter('LOWER(severity) = ?', severity);
   if (fromIso) pushFilter('created_at >= ?', fromIso);
   if (toIso) pushFilter('created_at <= ?', toIso);
