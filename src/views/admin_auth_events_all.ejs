@@ -82,5 +82,26 @@
       </div>
     </section>
   </main>
+  <script>
+    (() => {
+      const filterForm = document.querySelector('.admin-filters');
+      const pageSizeSelect = document.querySelector('#page_size');
+      if (!filterForm || !pageSizeSelect) return;
+
+      pageSizeSelect.addEventListener('change', () => {
+        const pageInput = filterForm.querySelector('input[name="page"]');
+        if (pageInput) {
+          pageInput.value = '1';
+        } else {
+          const hiddenPageInput = document.createElement('input');
+          hiddenPageInput.type = 'hidden';
+          hiddenPageInput.name = 'page';
+          hiddenPageInput.value = '1';
+          filterForm.appendChild(hiddenPageInput);
+        }
+        filterForm.submit();
+      });
+    })();
+  </script>
 </body>
 </html>
