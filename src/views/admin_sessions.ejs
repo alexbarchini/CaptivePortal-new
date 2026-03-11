@@ -106,7 +106,7 @@
                     <td><span title="<%= session.created_at_label %>"><%= session.created_at_label %></span></td>
                     <td><span title="<%= session.authorized_at_label %>"><%= session.authorized_at_label %></span></td>
                     <td><%= session.duration_hms || '-' %></td>
-                    <td><span class="status-pill status-<%= String(session.status || '').toLowerCase() %>"><%= session.status %></span></td>
+                    <td><span class="status-pill status-<%= String(session.status_class || session.status || '').toLowerCase() %>"><%= session.status %></span></td>
                     <td class="truncate" title="<%= session.uip || '-' %>"><%= session.uip || '-' %></td>
                     <td class="truncate" title="<%= session.client_mac || '-' %>"><%= session.client_mac || '-' %></td>
                     <td><%= session.vlan || '-' %></td>

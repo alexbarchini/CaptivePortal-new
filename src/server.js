@@ -19,7 +19,11 @@ const {
 } = require('./utils/validators');
 const { loginAsync, disconnectAsync, statusAsync, isRetryableNbiError } = require('./services/ruckusNbi');
 const { buildSmsProvider } = require('./services/smsProvider');
-const { enforceMaxOpenSessionsTx, closeStaleAuthorizedOpenSessions } = require('./services/sessionCleanup');
+const {
+  enforceMaxOpenSessionsTx,
+  closeStaleAuthorizedOpenSessions,
+  closeExpiredPendingSessions
+} = require('./services/sessionCleanup');
 const { logInfo, logError, LOG_TZ, AUTH_LOG_FILE_PATH } = require('./utils/logger');
 const { detectDeviceType } = require('./utils/device');
 const { resolveNbiMode, validateNbiConfigOrThrow, buildNbiConfigSnapshot } = require('./services/nbiConfig');
@@ -50,6 +54,7 @@ const LOGIN_INVALID_MAC_WINDOW_SECONDS = 600;
 const LOGIN_INVALID_MAC_MAX_PER_WINDOW = 10;
 const LOGIN_INVALID_MAC_BLOCK_SECONDS = 600;
 const LOGIN_SESSION_TTL_SECONDS = Number(process.env.LOGIN_SESSION_TTL_SECONDS || 600);
+const PENDING_SESSION_TIMEOUT_MINUTES = Number(process.env.PENDING_SESSION_TIMEOUT_MINUTES || 60);
 const ADMIN_SESSION_COOKIE_NAME = 'admin_session';
 const ADMIN_SESSION_TTL_MS = Number(process.env.ADMIN_SESSION_TTL_HOURS || 8) * 60 * 60 * 1000;
 const ADMIN_ALLOWED_CIDRS = String(process.env.ADMIN_ALLOWED_CIDRS || '10.9.62.0/23').split(',').map((item) => item.trim()).filter(Boolean);
@@ -521,6 +526,14 @@ function formatDurationHms(secondsValue) {
   const minutes = Math.floor((totalSeconds / 60) % 60);
   const hours = Math.floor(totalSeconds / 3600);
   return [hours, minutes, seconds].map((part) => String(part).padStart(2, '0')).join(':');
+}
+
+
+function formatAdminSessionStatus(session = {}) {
+  const normalizedStatus = String(session.status || (session.consumed_at ? 'CLOSED' : (session.authorized_at ? 'OPEN' : 'PENDING'))).toUpperCase();
+  const closedReason = String(session.closed_reason || '').toLowerCase();
+  if (normalizedStatus === 'CLOSED' && closedReason === 'pending_timeout') return 'CLOSED (TIMEOUT)';
+  return normalizedStatus;
 }
 
 function parseDatetimeLocal(value = '') {
@@ -1715,6 +1728,7 @@ app.get('/admin/sessions', async (req, res) => {
             ls.authorized_at,
             ls.status,
             ls.closed_at,
+            ls.closed_reason,
             ls.otp_verified_at,
             ls.consumed_at,
             ls.uip,
@@ -1746,7 +1760,8 @@ app.get('/admin/sessions', async (req, res) => {
   const hasNextPage = sessionsResult.rows.length > 50;
   const sessions = sessionsResult.rows.slice(0, 50).map((session) => ({
     ...session,
-    status: session.status || (session.consumed_at ? 'CLOSED' : (session.authorized_at ? 'OPEN' : 'PENDING')),
+    status: formatAdminSessionStatus(session),
+    status_class: String(session.status || (session.consumed_at ? 'CLOSED' : (session.authorized_at ? 'OPEN' : 'PENDING'))).toLowerCase(),
     duration_hms: formatDurationHms(session.duration_seconds),
     created_at_label: formatDateTime(session.created_at),
     authorized_at_label: formatDateTime(session.authorized_at),
@@ -2209,7 +2224,7 @@ app.get('/register', async (req, res) => {
   const lsid = String(req.query.lsid || '');
   if (!lsid) return res.redirect('/portal');
   const session = await getLoginSession(lsid);
-  if (!session || new Date(session.expires_at) < new Date()) return res.redirect('/portal');
+  if (!session || session.status !== 'PENDING' || new Date(session.expires_at) < new Date()) return res.redirect('/portal');
   logCtxPresence('register_ctx_lookup', lsid, buildCtxFromSession(session));
   res.render('register', { title: 'Cadastro de visitante', error: null, values: {}, lsid });
 });
@@ -2228,7 +2243,7 @@ app.get('/verify/sms', async (req, res) => {
 
   if (sessionQuery.rowCount === 0) return res.redirect('/portal');
   const session = sessionQuery.rows[0];
-  if (session.authorized_at || session.consumed_at || new Date(session.expires_at) < new Date()) return res.redirect('/portal');
+  if (session.status !== 'PENDING' || session.authorized_at || session.consumed_at || new Date(session.expires_at) < new Date()) return res.redirect('/portal');
 
   logCtxPresence('verify_sms_ctx_lookup', lsid, buildCtxFromSession(session));
   const cooldown = await ensureResendCooldown(session.user_id, lsid);
@@ -2259,7 +2274,7 @@ app.post('/register', async (req, res) => {
 
   logInfo('register_attempt_started', requestContext);
   logCtxPresence('register_post_ctx_lookup', lsid, params);
-  if (!session || new Date(session.expires_at) < new Date()) {
+  if (!session || session.status !== 'PENDING' || new Date(session.expires_at) < new Date()) {
     return res.status(400).render('portal', {
       title: 'Portal Visitantes TRT9',
       error: 'Sessão do captive expirada, volte e conecte novamente ao Wi-Fi',
@@ -2268,7 +2283,7 @@ app.post('/register', async (req, res) => {
     });
   }
 
-  if (session.authorized_at || session.consumed_at) {
+  if (session.status !== 'PENDING' || session.authorized_at || session.consumed_at) {
     return res.redirect(getOriginalUrl(params));
   }
 
@@ -2363,7 +2378,7 @@ app.post('/login', async (req, res) => {
       message: 'Sessão expirada ou entrada inválida. Conecte-se ao Wi‑Fi de visitantes e abra um site para iniciar novamente o fluxo captive.'
     });
   }
-  if (session.authorized_at || session.consumed_at) {
+  if (session.status !== 'PENDING' || session.authorized_at || session.consumed_at) {
     return res.redirect(getOriginalUrl(params));
   }
 
@@ -2471,7 +2486,7 @@ app.post('/verify/sms/resend', async (req, res) => {
     }
 
     const session = sessionQuery.rows[0];
-    if (session.authorized_at || session.consumed_at || new Date(session.expires_at) < new Date()) {
+    if (session.status !== 'PENDING' || session.authorized_at || session.consumed_at || new Date(session.expires_at) < new Date()) {
       if (expectsJson) return res.status(401).json({ success: false, error: 'Sessão inválida ou expirada.' });
       return genericInvalidCredentials(res, lsid);
     }
@@ -2582,8 +2597,8 @@ async function verifySmsHandler(req, res) {
         message: 'Sessão expirada ou entrada inválida. Conecte-se ao Wi‑Fi de visitantes e abra um site para iniciar novamente o fluxo captive.'
       });
     }
-    if (session.authorized_at || session.consumed_at) return res.redirect(getOriginalUrl(sessionCtx));
-    if (new Date(session.expires_at) < new Date()) throw new AuthFlowError('Sessão inválida.', 'Sessão do captive expirada, volte e conecte novamente ao Wi-Fi', 400);
+    if (session.status !== 'PENDING' || session.authorized_at || session.consumed_at) return res.redirect(getOriginalUrl(sessionCtx));
+    if (new Date(session.expires_at) < new Date() || session.status !== 'PENDING') throw new AuthFlowError('Sessão inválida.', 'Sessão do captive expirada, volte e conecte novamente ao Wi-Fi', 400);
 
     const wispr = resolveWisprParams(sessionCtx);
     const cpf = session.cpf_normalizado || null;
@@ -3104,9 +3119,15 @@ async function bootstrap() {
   await runMigrations(pool);
 
   await closeStaleAuthorizedOpenSessions(24);
+  await closeExpiredPendingSessions(PENDING_SESSION_TIMEOUT_MINUTES);
+
   setInterval(() => {
     closeStaleAuthorizedOpenSessions(24);
   }, 30 * 60 * 1000);
+
+  setInterval(() => {
+    closeExpiredPendingSessions(PENDING_SESSION_TIMEOUT_MINUTES);
+  }, 5 * 60 * 1000);
 
   app.listen(PORT, () => {
     console.log(`Portal online na porta ${PORT}`);
