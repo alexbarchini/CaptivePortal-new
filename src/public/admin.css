@@ -286,3 +286,33 @@
   gap: 8px;
   align-items: center;
 }
+
+
+.pagination-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid #c9d3e5;
+  background: #fff;
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.pagination-btn:hover {
+  background: #eef3ff;
+}
+
+.pagination-btn.is-active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
+.pagination-btn.is-disabled {
+  pointer-events: none;
+  opacity: 0.45;
+}

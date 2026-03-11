@@ -1686,6 +1686,38 @@ function parsePageAndPageSize(reqQuery = {}, defaultPageSize = 20) {
   return { page, pageSize, offset };
 }
 
+function buildPaginationMeta({ page, pageSize, totalCount }) {
+  const safeTotalCount = Math.max(0, Number(totalCount) || 0);
+  const totalPages = Math.max(1, Math.ceil(safeTotalCount / pageSize));
+  const currentPage = Math.min(Math.max(1, page), totalPages);
+  const hasPrevPage = currentPage > 1;
+  const hasNextPage = currentPage < totalPages;
+
+  return {
+    totalCount: safeTotalCount,
+    currentPage,
+    pageSize,
+    totalPages,
+    hasPrevPage,
+    hasNextPage,
+    prevPage: hasPrevPage ? currentPage - 1 : 1,
+    nextPage: hasNextPage ? currentPage + 1 : totalPages
+  };
+}
+
+function buildPageWindow(currentPage, totalPages, windowSize = 5) {
+  const size = Math.max(1, windowSize);
+  const half = Math.floor(size / 2);
+  let start = Math.max(1, currentPage - half);
+  let end = Math.min(totalPages, start + size - 1);
+
+  if ((end - start + 1) < size) {
+    start = Math.max(1, end - size + 1);
+  }
+
+  return Array.from({ length: Math.max(0, end - start + 1) }, (_, index) => start + index);
+}
+
 function mapAuthEventLabel(eventType = '') {
   const labels = {
     portal_start: 'Início do portal',
@@ -2177,19 +2209,27 @@ app.get('/admin/auth-events', async (req, res) => {
   query.values.push(allowedEventTypes);
   query.filters.push(`event_type = ANY($${query.values.length}::text[])`);
 
-  query.values.push(query.pageSize + 1, query.offset);
   const whereClause = query.filters.length > 0 ? `WHERE ${query.filters.join(' AND ')}` : '';
+  const countResult = await pool.query(
+    `SELECT COUNT(*)::int AS total_count
+     FROM auth_events
+     ${whereClause}`,
+    query.values
+  );
+  const totalCount = countResult.rows?.[0]?.total_count || 0;
+  const paginationMeta = buildPaginationMeta({ page: query.page, pageSize: query.pageSize, totalCount });
+
+  const rowsQueryValues = [...query.values, paginationMeta.pageSize, (paginationMeta.currentPage - 1) * paginationMeta.pageSize];
   const rows = await pool.query(
     `SELECT id, created_at, event_type, lsid, user_id, cpf, client_ip, client_mac, details_json
      FROM auth_events
      ${whereClause}
      ORDER BY created_at DESC
-     LIMIT $${query.values.length - 1} OFFSET $${query.values.length}`,
-    query.values
+     LIMIT $${rowsQueryValues.length - 1} OFFSET $${rowsQueryValues.length}`,
+    rowsQueryValues
   );
 
-  const hasNextPage = rows.rows.length > query.pageSize;
-  const events = rows.rows.slice(0, query.pageSize);
+  const events = rows.rows;
 
   return res.render('admin_auth_events_all', {
     title: 'Administração · Auth Events',
@@ -2212,12 +2252,21 @@ app.get('/admin/auth-events', async (req, res) => {
       reason_label: mapSecurityReason(event.details_json?.reason || '')
     })),
     pagination: {
-      page: query.page,
-      pageSize: query.pageSize,
-      hasNextPage,
-      hasPrevPage: query.page > 1,
-      prevPage: Math.max(1, query.page - 1),
-      nextPage: query.page + 1,
+      page: paginationMeta.currentPage,
+      current_page: paginationMeta.currentPage,
+      pageSize: paginationMeta.pageSize,
+      page_size: paginationMeta.pageSize,
+      totalCount: paginationMeta.totalCount,
+      total_count: paginationMeta.totalCount,
+      totalPages: paginationMeta.totalPages,
+      total_pages: paginationMeta.totalPages,
+      hasNextPage: paginationMeta.hasNextPage,
+      hasPrevPage: paginationMeta.hasPrevPage,
+      prevPage: paginationMeta.prevPage,
+      nextPage: paginationMeta.nextPage,
+      firstPage: 1,
+      lastPage: paginationMeta.totalPages,
+      pageWindow: buildPageWindow(paginationMeta.currentPage, paginationMeta.totalPages),
       allowedPageSizes: AUTH_EVENTS_ALLOWED_PAGE_SIZES
     }
   });
@@ -2228,19 +2277,27 @@ app.get('/admin/auth-failures', async (req, res) => {
   query.values.push(AUTH_FAILURE_EVENT_TYPES);
   query.filters.push(`event_type = ANY($${query.values.length}::text[])`);
 
-  query.values.push(query.pageSize + 1, query.offset);
   const whereClause = query.filters.length > 0 ? `WHERE ${query.filters.join(' AND ')}` : '';
+  const countResult = await pool.query(
+    `SELECT COUNT(*)::int AS total_count
+     FROM auth_events
+     ${whereClause}`,
+    query.values
+  );
+  const totalCount = countResult.rows?.[0]?.total_count || 0;
+  const paginationMeta = buildPaginationMeta({ page: query.page, pageSize: query.pageSize, totalCount });
+
+  const rowsQueryValues = [...query.values, paginationMeta.pageSize, (paginationMeta.currentPage - 1) * paginationMeta.pageSize];
   const rows = await pool.query(
     `SELECT id, created_at, event_type, lsid, user_id, cpf, client_ip, client_mac, details_json
      FROM auth_events
      ${whereClause}
      ORDER BY created_at DESC
-     LIMIT $${query.values.length - 1} OFFSET $${query.values.length}`,
-    query.values
+     LIMIT $${rowsQueryValues.length - 1} OFFSET $${rowsQueryValues.length}`,
+    rowsQueryValues
   );
 
-  const hasNextPage = rows.rows.length > query.pageSize;
-  const events = rows.rows.slice(0, query.pageSize);
+  const events = rows.rows;
 
   return res.render('admin_auth_events', {
     title: 'Administração · Auth Failures',
@@ -2263,12 +2320,21 @@ app.get('/admin/auth-failures', async (req, res) => {
       reason_label: mapSecurityReason(event.details_json?.reason || '')
     })),
     pagination: {
-      page: query.page,
-      pageSize: query.pageSize,
-      hasNextPage,
-      hasPrevPage: query.page > 1,
-      prevPage: Math.max(1, query.page - 1),
-      nextPage: query.page + 1,
+      page: paginationMeta.currentPage,
+      current_page: paginationMeta.currentPage,
+      pageSize: paginationMeta.pageSize,
+      page_size: paginationMeta.pageSize,
+      totalCount: paginationMeta.totalCount,
+      total_count: paginationMeta.totalCount,
+      totalPages: paginationMeta.totalPages,
+      total_pages: paginationMeta.totalPages,
+      hasNextPage: paginationMeta.hasNextPage,
+      hasPrevPage: paginationMeta.hasPrevPage,
+      prevPage: paginationMeta.prevPage,
+      nextPage: paginationMeta.nextPage,
+      firstPage: 1,
+      lastPage: paginationMeta.totalPages,
+      pageWindow: buildPageWindow(paginationMeta.currentPage, paginationMeta.totalPages),
       allowedPageSizes: AUTH_EVENTS_ALLOWED_PAGE_SIZES
     }
   });
@@ -2306,6 +2372,7 @@ app.get('/admin/security-events', async (req, res) => {
   const toRaw = String(req.query.to || '').trim();
   const fromIso = parseDatetimeLocal(fromRaw);
   const toIso = parseDatetimeLocal(toRaw);
+  const { page, pageSize } = parsePageAndPageSize(req.query, 20);
 
   const filters = [];
   const values = [];
@@ -2343,21 +2410,30 @@ app.get('/admin/security-events', async (req, res) => {
     filters.push(`(${correlationFilters.join(' OR ')})`);
   }
 
-  values.push(200);
   const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
+  const countResult = await pool.query(
+    `SELECT COUNT(*)::int AS total_count
+     FROM security_events
+     ${whereClause}`,
+    values
+  );
+  const totalCount = countResult.rows?.[0]?.total_count || 0;
+  const paginationMeta = buildPaginationMeta({ page, pageSize, totalCount });
+
+  const rowsQueryValues = [...values, paginationMeta.pageSize, (paginationMeta.currentPage - 1) * paginationMeta.pageSize];
   const rows = await pool.query(
     `SELECT id, created_at, event_type, severity, correlation_type, correlation_value, description, reason, attempt_count, window_seconds, blocked_until, details_json
      FROM security_events
      ${whereClause}
      ORDER BY created_at DESC
-     LIMIT $${values.length}`,
-    values
+     LIMIT $${rowsQueryValues.length - 1} OFFSET $${rowsQueryValues.length}`,
+    rowsQueryValues
   );
 
   return res.render('admin_security_events', {
     title: 'Administração · Security Events',
     adminUser: req.adminSession.user,
-    filters: { cpf, mac: macRaw, ip, event_type: eventType, severity, from: fromRaw, to: toRaw, only_active_blocks: onlyActiveBlocks },
+    filters: { cpf, mac: macRaw, ip, event_type: eventType, severity, from: fromRaw, to: toRaw, only_active_blocks: onlyActiveBlocks, page_size: paginationMeta.pageSize },
     events: rows.rows.map((event) => ({
       ...event,
       event_label: mapSecurityEventLabel(event.event_type),
@@ -2365,7 +2441,25 @@ app.get('/admin/security-events', async (req, res) => {
       blocked_until_label: formatDateTime(event.blocked_until),
       description_label: event.description || '-',
       reason_label: mapSecurityReason(event.reason || '')
-    }))
+    })),
+    pagination: {
+      page: paginationMeta.currentPage,
+      current_page: paginationMeta.currentPage,
+      pageSize: paginationMeta.pageSize,
+      page_size: paginationMeta.pageSize,
+      totalCount: paginationMeta.totalCount,
+      total_count: paginationMeta.totalCount,
+      totalPages: paginationMeta.totalPages,
+      total_pages: paginationMeta.totalPages,
+      hasNextPage: paginationMeta.hasNextPage,
+      hasPrevPage: paginationMeta.hasPrevPage,
+      prevPage: paginationMeta.prevPage,
+      nextPage: paginationMeta.nextPage,
+      firstPage: 1,
+      lastPage: paginationMeta.totalPages,
+      pageWindow: buildPageWindow(paginationMeta.currentPage, paginationMeta.totalPages),
+      allowedPageSizes: AUTH_EVENTS_ALLOWED_PAGE_SIZES
+    }
   });
 });
 
