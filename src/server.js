@@ -884,17 +884,79 @@ function renderConnectedStatus(res, session, fallback = {}) {
 }
 
 async function createPortalSession(req, params) {
-  const lsid = crypto.randomUUID();
+  const newLsid = crypto.randomUUID();
   const ctx = pickWisprParams(params);
   const deviceType = detectDeviceType(req.get('user-agent') || '');
   const deviceName = getDeviceNameFromRequest(req, params);
   const normalizedClientMac = normalizeMacIfPlain(ctx.client_mac);
+  let lsid = newLsid;
+  let reusedSessionMetadata = null;
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     if (normalizedClientMac) {
+      const reusablePendingSessionResult = await client.query(
+        `SELECT id, created_at
+         FROM login_sessions
+         WHERE status = 'PENDING'
+           AND client_mac = $1
+           AND created_at >= NOW() - ($2::int * INTERVAL '1 minute')
+         ORDER BY created_at DESC
+         LIMIT 1
+         FOR UPDATE`,
+        [normalizedClientMac, PENDING_SESSION_TIMEOUT_MINUTES]
+      );
+
+      if (reusablePendingSessionResult.rowCount > 0) {
+        const reusablePendingSession = reusablePendingSessionResult.rows[0];
+        lsid = reusablePendingSession.id;
+        reusedSessionMetadata = {
+          id: reusablePendingSession.id,
+          previousCreatedAt: reusablePendingSession.created_at
+        };
+
+        await client.query(
+          `UPDATE login_sessions
+           SET ctx_json = $2::jsonb,
+               nbi_ip = COALESCE(NULLIF($3, ''), nbi_ip),
+               uip = COALESCE(NULLIF($4, ''), uip),
+               proxy = COALESCE(NULLIF($5, ''), proxy),
+               ssid = COALESCE(NULLIF($6, ''), ssid),
+               sip = COALESCE(NULLIF($7, ''), sip),
+               dn = COALESCE(NULLIF($8, ''), dn),
+               wlan_name = COALESCE(NULLIF($9, ''), wlan_name),
+               url = COALESCE(NULLIF($10, ''), url),
+               apip = COALESCE(NULLIF($11, ''), apip),
+               vlan = COALESCE(NULLIF($12, ''), vlan),
+               expires_at = NOW() + ($13 || ' seconds')::interval,
+               device_type = COALESCE(NULLIF($14, ''), device_type),
+               device_name = COALESCE(NULLIF($15, ''), device_name),
+               user_agent = COALESCE(NULLIF($16, ''), user_agent)
+           WHERE id = $1
+             AND status = 'PENDING'`,
+          [
+            lsid,
+            JSON.stringify(ctx),
+            ctx.nbiIP,
+            ctx.uip,
+            ctx.proxy,
+            ctx.ssid,
+            ctx.sip,
+            ctx.dn,
+            ctx.wlanName,
+            ctx.url,
+            ctx.apip,
+            ctx.vlan,
+            LOGIN_SESSION_TTL_SECONDS,
+            deviceType,
+            deviceName,
+            req.get('user-agent') || ''
+          ]
+        );
+      }
+
       await client.query(
         `UPDATE login_sessions
          SET status = 'CLOSED',
@@ -906,32 +968,34 @@ async function createPortalSession(req, params) {
       );
     }
 
-    await client.query(
-      `INSERT INTO login_sessions (
-        id, ctx_json, nbi_ip, uip, client_mac, proxy, ssid, sip, dn, wlan_name, url, apip, vlan, expires_at, device_type, device_name, user_agent, status
-      ) VALUES (
-        $1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + ($14 || ' seconds')::interval, $15, $16, $17, 'PENDING'
-      )`,
-      [
-        lsid,
-        JSON.stringify(ctx),
-        ctx.nbiIP,
-        ctx.uip,
-        normalizedClientMac,
-        ctx.proxy,
-        ctx.ssid,
-        ctx.sip,
-        ctx.dn,
-        ctx.wlanName,
-        ctx.url,
-        ctx.apip,
-        ctx.vlan,
-        LOGIN_SESSION_TTL_SECONDS,
-        deviceType,
-        deviceName,
-        req.get('user-agent') || ''
-      ]
-    );
+    if (!reusedSessionMetadata) {
+      await client.query(
+        `INSERT INTO login_sessions (
+          id, ctx_json, nbi_ip, uip, client_mac, proxy, ssid, sip, dn, wlan_name, url, apip, vlan, expires_at, device_type, device_name, user_agent, status
+        ) VALUES (
+          $1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW() + ($14 || ' seconds')::interval, $15, $16, $17, 'PENDING'
+        )`,
+        [
+          lsid,
+          JSON.stringify(ctx),
+          ctx.nbiIP,
+          ctx.uip,
+          normalizedClientMac,
+          ctx.proxy,
+          ctx.ssid,
+          ctx.sip,
+          ctx.dn,
+          ctx.wlanName,
+          ctx.url,
+          ctx.apip,
+          ctx.vlan,
+          LOGIN_SESSION_TTL_SECONDS,
+          deviceType,
+          deviceName,
+          req.get('user-agent') || ''
+        ]
+      );
+    }
 
     await client.query('COMMIT');
   } catch (error) {
@@ -942,6 +1006,16 @@ async function createPortalSession(req, params) {
   }
 
   const hostResolution = await resolveSmartZoneHost(ctx);
+  if (reusedSessionMetadata) {
+    logInfo('pending_session_reused', {
+      reused_session_id: reusedSessionMetadata.id,
+      client_mac: normalizedClientMac || null,
+      client_ip: normalizeClientIp(ctx.uip),
+      previous_created_at: reusedSessionMetadata.previousCreatedAt,
+      reason: 'same_client_recent_pending'
+    });
+  }
+
   logInfo('portal_ctx_captured', {
     lsid,
     params: sanitizeParams(ctx),
