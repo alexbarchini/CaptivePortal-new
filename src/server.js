@@ -47,12 +47,15 @@ const OTP_INVALID_BLOCK_SECONDS = Number(process.env.OTP_INVALID_BLOCK_SECONDS |
 const LOGIN_INVALID_CPF_WINDOW_SECONDS = 600;
 const LOGIN_INVALID_CPF_MAX_PER_WINDOW = 5;
 const LOGIN_INVALID_CPF_BLOCK_SECONDS = 900;
-const LOGIN_INVALID_IP_WINDOW_SECONDS = 300;
-const LOGIN_INVALID_IP_MAX_PER_WINDOW = 20;
+const LOGIN_INVALID_IP_WINDOW_SECONDS = 600;
+const LOGIN_INVALID_IP_MAX_PER_WINDOW = 10;
 const LOGIN_INVALID_IP_BLOCK_SECONDS = 600;
 const LOGIN_INVALID_MAC_WINDOW_SECONDS = 600;
 const LOGIN_INVALID_MAC_MAX_PER_WINDOW = 10;
 const LOGIN_INVALID_MAC_BLOCK_SECONDS = 600;
+const LOGIN_DISTINCT_CPF_BY_IP_WINDOW_SECONDS = 600;
+const LOGIN_DISTINCT_CPF_BY_IP_MAX_PER_WINDOW = 10;
+const LOGIN_DISTINCT_CPF_BY_IP_BLOCK_SECONDS = 900;
 const LOGIN_SESSION_TTL_SECONDS = Number(process.env.LOGIN_SESSION_TTL_SECONDS || 600);
 const PENDING_SESSION_TIMEOUT_MINUTES = Number(process.env.PENDING_SESSION_TIMEOUT_MINUTES || 60);
 const ADMIN_SESSION_COOKIE_NAME = 'admin_session';
@@ -1203,9 +1206,10 @@ async function evaluateLoginBruteforceBlocks({ cpf, clientIp = null, clientMac =
 
   const cpfBlock = cpf ? await getActiveSecurityBlock('cpf', cpf, 'cpf_bruteforce_suspected') : null;
   const ipBlock = normalizedIp ? await getActiveSecurityBlock('ip', normalizedIp, 'ip_bruteforce_suspected') : null;
+  const ipCpfEnumerationBlock = normalizedIp ? await getActiveSecurityBlock('ip', normalizedIp, 'cpf_enumeration_suspected') : null;
   const macBlock = normalizedMac ? await getActiveSecurityBlock('mac', normalizedMac, 'mac_bruteforce_suspected') : null;
 
-  const activeBlocks = [cpfBlock, ipBlock, macBlock].filter(Boolean);
+  const activeBlocks = [cpfBlock, ipBlock, ipCpfEnumerationBlock, macBlock].filter(Boolean);
   if (activeBlocks.length === 0) return null;
 
   const primaryBlock = activeBlocks.reduce((latest, current) => {
@@ -1290,12 +1294,25 @@ async function registerInvalidLoginAttempt({ cpf, clientIp = null, clientMac = n
       [normalizedMac, LOGIN_INVALID_MAC_WINDOW_SECONDS]
     )
     : Promise.resolve({ rows: [{ attempt_count: 0 }] });
+  const distinctCpfByIpQuery = normalizedIp
+    ? pool.query(
+      `SELECT COUNT(DISTINCT cpf)::int AS distinct_cpf_count
+       FROM auth_events
+       WHERE event_type = 'login_invalid_credentials'
+         AND client_ip = $1
+         AND cpf IS NOT NULL
+         AND cpf <> ''
+         AND created_at >= NOW() - ($2::int * INTERVAL '1 second')`,
+      [normalizedIp, LOGIN_DISTINCT_CPF_BY_IP_WINDOW_SECONDS]
+    )
+    : Promise.resolve({ rows: [{ distinct_cpf_count: 0 }] });
 
-  const [countByCpfResult, countByIpResult, countByMacResult] = await Promise.all([countByCpfQuery, countByIpQuery, countByMacQuery]);
+  const [countByCpfResult, countByIpResult, countByMacResult, distinctCpfByIpResult] = await Promise.all([countByCpfQuery, countByIpQuery, countByMacQuery, distinctCpfByIpQuery]);
 
   const countByCpf = countByCpfResult.rows[0]?.attempt_count || 0;
   const countByIp = countByIpResult.rows[0]?.attempt_count || 0;
   const countByMac = countByMacResult.rows[0]?.attempt_count || 0;
+  const distinctCpfByIpCount = distinctCpfByIpResult.rows[0]?.distinct_cpf_count || 0;
 
   if (cpf && countByCpf >= LOGIN_INVALID_CPF_MAX_PER_WINDOW) {
     const blockedUntilQuery = await pool.query(
@@ -1329,11 +1346,36 @@ async function registerInvalidLoginAttempt({ cpf, clientIp = null, clientMac = n
       correlationType: 'ip',
       correlationValue: normalizedIp,
       description: 'Tentativas inválidas de login excederam limite por IP.',
-      reason: 'max_20_invalid_in_5_minutes',
+      reason: 'max_10_invalid_in_10_minutes',
       attemptCount: countByIp,
       windowSeconds: LOGIN_INVALID_IP_WINDOW_SECONDS,
       blockedUntil,
       details: { cpf, client_ip: normalizedIp, client_mac: normalizedMac || null }
+    });
+  }
+
+  if (normalizedIp && distinctCpfByIpCount >= LOGIN_DISTINCT_CPF_BY_IP_MAX_PER_WINDOW) {
+    const blockedUntilQuery = await pool.query(
+      `SELECT NOW() + ($1::int * INTERVAL '1 second') AS blocked_until`,
+      [LOGIN_DISTINCT_CPF_BY_IP_BLOCK_SECONDS]
+    );
+    const blockedUntil = blockedUntilQuery.rows[0]?.blocked_until || null;
+    await recordSecurityEvent({
+      eventType: 'cpf_enumeration_suspected',
+      severity: 'high',
+      correlationType: 'ip',
+      correlationValue: normalizedIp,
+      description: 'Enumeração de CPF suspeita para o mesmo IP.',
+      reason: 'too_many_distinct_cpf_attempts',
+      attemptCount: distinctCpfByIpCount,
+      windowSeconds: LOGIN_DISTINCT_CPF_BY_IP_WINDOW_SECONDS,
+      blockedUntil,
+      details: {
+        ip: normalizedIp,
+        distinct_cpf_count: distinctCpfByIpCount,
+        window_seconds: LOGIN_DISTINCT_CPF_BY_IP_WINDOW_SECONDS,
+        blocked_until: blockedUntil
+      }
     });
   }
 
@@ -1794,6 +1836,7 @@ function mapSecurityEventLabel(eventType = '') {
     multiple_failures_same_mac: 'Múltiplas falhas de autenticação no mesmo MAC',
     cpf_bruteforce_suspected: 'Força bruta suspeita por CPF',
     ip_bruteforce_suspected: 'Força bruta suspeita por IP',
+    cpf_enumeration_suspected: 'Enumeração de CPF suspeita por IP',
     mac_bruteforce_suspected: 'Força bruta suspeita por MAC',
     login_blocked: 'Tentativa de login bloqueada'
   };
@@ -1809,6 +1852,7 @@ function mapSecurityReason(reason = '') {
     max_5_invalid_in_10_minutes: '5 tentativas inválidas em 10 minutos',
     max_20_invalid_in_5_minutes: '20 tentativas inválidas em 5 minutos',
     max_10_invalid_in_10_minutes: '10 tentativas inválidas em 10 minutos',
+    too_many_distinct_cpf_attempts: 'Muitos CPFs distintos tentados no mesmo IP',
     active_bruteforce_block: 'Tentativa bloqueada por bloqueio anti-força-bruta ativo'
   };
   return labels[reason] || reason || '-';
