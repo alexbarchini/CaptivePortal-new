@@ -59,8 +59,17 @@
           </label>
         </div>
 
+        <div class="filter-field">
+          <label for="page_size">Itens por página</label>
+          <select id="page_size" name="page_size">
+            <% (pagination?.allowedPageSizes || [10, 20, 50, 100]).forEach((size) => { %>
+              <option value="<%= size %>" <%= Number(filters?.page_size || 20) === Number(size) ? 'selected' : '' %>><%= size %></option>
+            <% }) %>
+          </select>
+        </div>
+
         <div class="filter-actions">
-          <button type="submit">Pesquisar</button>
+          <button type="submit">Filtrar</button>
         </div>
       </form>
 
@@ -71,7 +80,7 @@
 
 
       <% if (!error) { %>
-        <h3>Sessões recentes (até 50 por página)</h3>
+        <h3>Sessões recentes</h3>
         <% if (!sessions || sessions.length === 0) { %>
           <div class="alert">Nenhum resultado encontrado para os filtros informados.</div>
         <% } else { %>
@@ -132,11 +141,26 @@
             </table>
           </div>
 
+          <% const queryForPage = (targetPage) => {
+            const params = new URLSearchParams();
+            params.set('page', String(targetPage));
+            params.set('page_size', String(filters?.page_size || 20));
+            if (filters?.cpf) params.set('cpf', filters.cpf);
+            if (filters?.name) params.set('name', filters.name);
+            if (filters?.mac) params.set('mac', filters.mac);
+            if (filters?.ip) params.set('ip', filters.ip);
+            if (filters?.from) params.set('from', filters.from);
+            if (filters?.to) params.set('to', filters.to);
+            (filters?.status || []).forEach((status) => params.append('status', status));
+            return params.toString();
+          }; %>
+
           <div class="admin-pagination">
-            <span class="subtle">Offset atual: <strong><%= pagination?.offset || 0 %></strong></span>
-            <% if (pagination?.hasNextPage) { %>
-              <a class="next-page" href="/admin/sessions?cpf=<%= encodeURIComponent(filters?.cpf || '') %>&name=<%= encodeURIComponent(filters?.name || '') %>&mac=<%= encodeURIComponent(filters?.mac || '') %>&ip=<%= encodeURIComponent(filters?.ip || '') %>&from=<%= encodeURIComponent(filters?.from || '') %>&to=<%= encodeURIComponent(filters?.to || '') %><% (filters?.status || []).forEach((status) => { %>&status=<%= encodeURIComponent(status) %><% }) %>&offset=<%= pagination?.nextOffset || 50 %>">Próxima página</a>
-            <% } %>
+            <span class="subtle">Página <strong><%= pagination?.current_page || 1 %></strong> · Offset: <strong><%= pagination?.offset || 0 %></strong> · <strong><%= pagination?.page_size || 20 %></strong> por página</span>
+            <div class="admin-pagination-links">
+              <a class="pagination-btn <%= (pagination?.current_page || 1) <= 1 ? 'is-disabled' : '' %>" href="<%= (pagination?.current_page || 1) <= 1 ? '#' : '/admin/sessions?' + queryForPage(pagination.prevPage || 1) %>">&lt;</a>
+              <a class="pagination-btn <%= !(pagination?.hasNextPage) ? 'is-disabled' : '' %>" href="<%= !(pagination?.hasNextPage) ? '#' : '/admin/sessions?' + queryForPage(pagination.nextPage || ((pagination?.current_page || 1) + 1)) %>">&gt;</a>
+            </div>
           </div>
         <% } %>
       <% } %>
@@ -147,13 +171,28 @@
 
       const filterForm = document.querySelector('.admin-filters');
       const statusCheckboxes = filterForm ? filterForm.querySelectorAll('input[name="status"]') : [];
-      if (filterForm && statusCheckboxes.length > 0) {
+      const pageSizeSelect = filterForm ? filterForm.querySelector('#page_size') : null;
+      if (filterForm) {
         filterForm.addEventListener('submit', () => {
           const selectedCount = Array.from(statusCheckboxes).filter((checkbox) => checkbox.checked).length;
           if (selectedCount === 0) {
             statusCheckboxes.forEach((checkbox) => { checkbox.checked = true; });
           }
         });
+
+        if (pageSizeSelect) {
+          pageSizeSelect.addEventListener('change', () => {
+            let pageInput = filterForm.querySelector('input[name="page"]');
+            if (!pageInput) {
+              pageInput = document.createElement('input');
+              pageInput.type = 'hidden';
+              pageInput.name = 'page';
+              filterForm.appendChild(pageInput);
+            }
+            pageInput.value = '1';
+            filterForm.submit();
+          });
+        }
       }
 
 

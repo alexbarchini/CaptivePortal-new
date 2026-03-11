@@ -1822,8 +1822,11 @@ app.get('/admin/sessions', async (req, res) => {
   const macNormalized = normalizeMacForFilter(macRaw);
   const fromRaw = String(req.query.from || '').trim();
   const toRaw = String(req.query.to || '').trim();
+  const { page: requestedPage, pageSize } = parsePageAndPageSize(req.query, 20);
   const offsetRaw = Number.parseInt(String(req.query.offset || '0'), 10);
-  const offset = Number.isInteger(offsetRaw) && offsetRaw > 0 ? offsetRaw : 0;
+  const legacyOffset = Number.isInteger(offsetRaw) && offsetRaw > 0 ? offsetRaw : 0;
+  const page = req.query.page ? requestedPage : (Math.floor(legacyOffset / pageSize) + 1);
+  const offset = (page - 1) * pageSize;
   const fromIso = parseDatetimeLocal(fromRaw);
   const toIso = parseDatetimeLocal(toRaw);
   const statusFilter = normalizeAdminStatusFilter(req.query.status);
@@ -1832,10 +1835,10 @@ app.get('/admin/sessions', async (req, res) => {
     return res.status(400).render('admin_sessions', {
       title: 'Sessões administrativas',
       adminUser: req.adminSession.user,
-      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw, status: statusFilter },
+      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw, status: statusFilter, page_size: pageSize },
       error: 'CPF inválido para consulta.',
       sessions: [],
-      pagination: { limit: 50, offset, hasNextPage: false, nextOffset: offset + 50 }
+      pagination: { page_size: pageSize, current_page: page, offset, hasNextPage: false, nextPage: page + 1 }
     });
   }
 
@@ -1843,10 +1846,10 @@ app.get('/admin/sessions', async (req, res) => {
     return res.status(400).render('admin_sessions', {
       title: 'Sessões administrativas',
       adminUser: req.adminSession.user,
-      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw, status: statusFilter },
+      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw, status: statusFilter, page_size: pageSize },
       error: 'MAC inválido para consulta.',
       sessions: [],
-      pagination: { limit: 50, offset, hasNextPage: false, nextOffset: offset + 50 }
+      pagination: { page_size: pageSize, current_page: page, offset, hasNextPage: false, nextPage: page + 1 }
     });
   }
 
@@ -1854,10 +1857,10 @@ app.get('/admin/sessions', async (req, res) => {
     return res.status(400).render('admin_sessions', {
       title: 'Sessões administrativas',
       adminUser: req.adminSession.user,
-      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw, status: statusFilter },
+      filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw, status: statusFilter, page_size: pageSize },
       error: 'Intervalo de data/hora inválido.',
       sessions: [],
-      pagination: { limit: 50, offset, hasNextPage: false, nextOffset: offset + 50 }
+      pagination: { page_size: pageSize, current_page: page, offset, hasNextPage: false, nextPage: page + 1 }
     });
   }
 
@@ -1882,7 +1885,7 @@ app.get('/admin/sessions', async (req, res) => {
     filters.push(`LOWER(ls.status) IN (${placeholders.join(', ')})`);
   }
 
-  values.push(51, offset);
+  values.push(pageSize + 1, offset);
   const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
   const sessionsResult = await pool.query(
     `SELECT ls.id AS lsid,
@@ -1919,8 +1922,8 @@ app.get('/admin/sessions', async (req, res) => {
     values
   );
 
-  const hasNextPage = sessionsResult.rows.length > 50;
-  const sessions = sessionsResult.rows.slice(0, 50).map((session) => ({
+  const hasNextPage = sessionsResult.rows.length > pageSize;
+  const sessions = sessionsResult.rows.slice(0, pageSize).map((session) => ({
     ...session,
     status: formatAdminSessionStatus(session),
     status_class: String(session.status || (session.consumed_at ? 'CLOSED' : (session.authorized_at ? 'OPEN' : 'PENDING'))).toLowerCase(),
@@ -1938,6 +1941,8 @@ app.get('/admin/sessions', async (req, res) => {
     from_filter: fromIso,
     to_filter: toIso,
     status_filter: statusFilter,
+    current_page: page,
+    page_size: pageSize,
     offset,
     result_count: sessions.length,
     admin_user: req.adminSession.user,
@@ -1947,10 +1952,10 @@ app.get('/admin/sessions', async (req, res) => {
   return res.render('admin_sessions', {
     title: 'Sessões administrativas',
     adminUser: req.adminSession.user,
-    filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw, status: statusFilter },
+    filters: { cpf: cpfNormalized, name: nameQuery, ip: ipQuery, mac: macRaw, from: fromRaw, to: toRaw, status: statusFilter, page_size: pageSize },
     error: null,
     sessions,
-    pagination: { limit: 50, offset, hasNextPage, nextOffset: offset + 50 }
+    pagination: { page_size: pageSize, current_page: page, offset, hasNextPage, nextPage: page + 1, prevPage: Math.max(1, page - 1), allowedPageSizes: AUTH_EVENTS_ALLOWED_PAGE_SIZES }
   });
 });
 
@@ -2218,8 +2223,10 @@ app.get('/admin/auth-events', async (req, res) => {
   );
   const totalCount = countResult.rows?.[0]?.total_count || 0;
   const paginationMeta = buildPaginationMeta({ page: query.page, pageSize: query.pageSize, totalCount });
+  const offset = (paginationMeta.currentPage - 1) * paginationMeta.pageSize;
+  logInfo('admin_auth_events_pagination', { current_page: paginationMeta.currentPage, page_size: paginationMeta.pageSize, offset });
 
-  const rowsQueryValues = [...query.values, paginationMeta.pageSize, (paginationMeta.currentPage - 1) * paginationMeta.pageSize];
+  const rowsQueryValues = [...query.values, paginationMeta.pageSize, offset];
   const rows = await pool.query(
     `SELECT id, created_at, event_type, lsid, user_id, cpf, client_ip, client_mac, details_json
      FROM auth_events
@@ -2286,8 +2293,10 @@ app.get('/admin/auth-failures', async (req, res) => {
   );
   const totalCount = countResult.rows?.[0]?.total_count || 0;
   const paginationMeta = buildPaginationMeta({ page: query.page, pageSize: query.pageSize, totalCount });
+  const offset = (paginationMeta.currentPage - 1) * paginationMeta.pageSize;
+  logInfo('admin_auth_failures_pagination', { current_page: paginationMeta.currentPage, page_size: paginationMeta.pageSize, offset });
 
-  const rowsQueryValues = [...query.values, paginationMeta.pageSize, (paginationMeta.currentPage - 1) * paginationMeta.pageSize];
+  const rowsQueryValues = [...query.values, paginationMeta.pageSize, offset];
   const rows = await pool.query(
     `SELECT id, created_at, event_type, lsid, user_id, cpf, client_ip, client_mac, details_json
      FROM auth_events
@@ -2419,8 +2428,10 @@ app.get('/admin/security-events', async (req, res) => {
   );
   const totalCount = countResult.rows?.[0]?.total_count || 0;
   const paginationMeta = buildPaginationMeta({ page, pageSize, totalCount });
+  const offset = (paginationMeta.currentPage - 1) * paginationMeta.pageSize;
+  logInfo('admin_security_events_pagination', { current_page: paginationMeta.currentPage, page_size: paginationMeta.pageSize, offset });
 
-  const rowsQueryValues = [...values, paginationMeta.pageSize, (paginationMeta.currentPage - 1) * paginationMeta.pageSize];
+  const rowsQueryValues = [...values, paginationMeta.pageSize, offset];
   const rows = await pool.query(
     `SELECT id, created_at, event_type, severity, correlation_type, correlation_value, description, reason, attempt_count, window_seconds, blocked_until, details_json
      FROM security_events
