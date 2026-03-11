@@ -37,6 +37,76 @@ function isSuccess(data) {
   return code === '101' || code === '201';
 }
 
+function hasHttpSuccessStatus(httpStatus) {
+  const status = Number(httpStatus);
+  return Number.isFinite(status) && status >= 200 && status < 300;
+}
+
+function interpretControllerDisconnect(detail = {}, { httpStatus } = {}) {
+  const code = responseCode(detail);
+  const replyMessage = String(detail?.ReplyMessage || '').trim();
+  const normalizedReply = replyMessage.toLowerCase();
+  const failureReplyPattern = /fail|failed|failure|error|invalid|denied|reject|unauthori|timeout|not\s+found/;
+
+  if (isSuccess(detail)) {
+    return {
+      success: true,
+      reason: 'response_code_success',
+      responseCode: code,
+      replyMessage,
+      httpStatus
+    };
+  }
+
+  if (normalizedReply === 'ok') {
+    return {
+      success: true,
+      reason: 'reply_message_ok',
+      responseCode: code,
+      replyMessage,
+      httpStatus
+    };
+  }
+
+  if (hasHttpSuccessStatus(httpStatus) && replyMessage && !failureReplyPattern.test(normalizedReply)) {
+    return {
+      success: true,
+      reason: 'http_success_with_compatible_reply_message',
+      responseCode: code,
+      replyMessage,
+      httpStatus
+    };
+  }
+
+  if (!hasHttpSuccessStatus(httpStatus)) {
+    return {
+      success: false,
+      reason: 'http_status_not_success',
+      responseCode: code,
+      replyMessage,
+      httpStatus
+    };
+  }
+
+  if (replyMessage && failureReplyPattern.test(normalizedReply)) {
+    return {
+      success: false,
+      reason: 'reply_message_indicates_failure',
+      responseCode: code,
+      replyMessage,
+      httpStatus
+    };
+  }
+
+  return {
+    success: false,
+    reason: 'no_success_evidence',
+    responseCode: code,
+    replyMessage,
+    httpStatus
+  };
+}
+
 function isApiCallAccepted(data) {
   const code = responseCode(data);
   return code === '101' || code === '201' || code === '202';
@@ -419,22 +489,32 @@ async function disconnectAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername }) {
 
   const disconnectResult = await postWithFallback({ nbiIP, payload: disconnectPayload, requestType: 'Disconnect', requestId, ueIp, ueMac: ueMacController, proxy, ueUsername });
   const disconnectResponse = disconnectResult.response;
+  const interpretation = interpretControllerDisconnect(disconnectResponse, { httpStatus: disconnectResult.httpStatus });
 
   logInfo('nbi_disconnect_result', {
     request_id: requestId,
     nbi_ip: nbiIP,
+    host_selected: nbiIP,
     endpoint: disconnectResult.endpoint,
+    payload: sanitizePayloadForLog(disconnectPayload),
+    http_status: disconnectResult.httpStatus || null,
     response_code: responseCode(disconnectResponse),
     reply_message: String(disconnectResponse?.ReplyMessage ?? ''),
     session_id: disconnectResponse?.SessionId || null,
-    transaction_id: disconnectResponse?.TransactionId || null
+    transaction_id: disconnectResponse?.TransactionId || null,
+    interpreted_result: interpretation.success ? 'success' : 'failure',
+    interpretation_reason: interpretation.reason
   });
 
-  if (isSuccess(disconnectResponse)) {
-    return { success: true, mode: 'disconnect', detail: disconnectResponse, requestId };
-  }
-
-  return { success: false, mode: 'disconnect', detail: disconnectResponse, requestId };
+  return {
+    success: interpretation.success,
+    mode: 'disconnect',
+    detail: disconnectResponse,
+    requestId,
+    endpoint: disconnectResult.endpoint,
+    httpStatus: disconnectResult.httpStatus || null,
+    interpretationReason: interpretation.reason
+  };
 }
 
 async function statusAsync({ nbiIP, ueIp, ueMac, proxy, ueUsername, uePassword }) {
