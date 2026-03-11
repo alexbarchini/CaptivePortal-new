@@ -66,7 +66,7 @@
                 <td><%= event.client_ip || '-' %></td>
                 <td class="truncate" title="<%= event.lsid || '-' %>"><%= event.lsid || '-' %></td>
                 <td class="truncate" title="<%= event.reason_label || '-' %>"><%= event.reason_label || '-' %></td>
-                <td class="truncate" title="<%= JSON.stringify(event.details_json || {}) %>"><%= JSON.stringify(event.details_json || {}) %></td>
+                <td class="truncate" title="<%= event.description_label || '-' %>"><%= event.description_label || '-' %></td>
               </tr>
             <% }) %>
           </tbody>

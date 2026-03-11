@@ -1033,6 +1033,20 @@ async function sendOtpForUser({ userId, phoneE164, reason, ueIp = null, ueMac = 
     [userId, lsid, phoneE164, codeHash, OTP_TTL_SECONDS, ueIp, normalizeMacIfPlain(ueMac)]
   );
 
+  let otpSendAttemptNumber = 1;
+  if (lsid) {
+    const sendAttempts = await pool.query(
+      `SELECT COUNT(*)::int AS send_count
+       FROM auth_events
+       WHERE lsid = $1
+         AND event_type IN ('otp_sent', 'otp_resend')`,
+      [lsid]
+    );
+    otpSendAttemptNumber = (sendAttempts.rows[0]?.send_count || 0) + 1;
+  }
+
+  const otpSendOrigin = reason === 'resend' ? 'resend' : 'initial';
+
   await recordAuthEvent({
     eventType: reason === 'resend' ? 'otp_resend' : 'otp_sent',
     lsid,
@@ -1040,7 +1054,12 @@ async function sendOtpForUser({ userId, phoneE164, reason, ueIp = null, ueMac = 
     cpf,
     clientMac: ueMac,
     clientIp: ueIp,
-    details: { reason, channel: 'sms' }
+    details: {
+      reason,
+      channel: 'sms',
+      otp_send_origin: otpSendOrigin,
+      otp_send_attempt_number: otpSendAttemptNumber
+    }
   });
 
   logInfo('otp_sent', { lsid, user_id: userId, destination: phoneE164, reason, ue_ip: ueIp, ue_mac: maskMac(ueMac) });
@@ -1538,13 +1557,19 @@ app.get('/admin', (req, res) => {
   return res.redirect('/admin/sessions');
 });
 
+function buildPtOrdinal(value) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1) return null;
+  return `${number}º`;
+}
+
 function mapAuthEventLabel(eventType = '') {
   const labels = {
-    otp_sent: 'OTP enviado (primeiro envio)',
+    otp_sent: 'OTP enviado',
     otp_resend: 'OTP reenviado',
     sms_rate_limited: 'Envio de SMS limitado por proteção',
-    otp_invalid: 'Tentativa de OTP inválida',
-    otp_validation_blocked: 'Validação OTP bloqueada',
+    otp_invalid: 'OTP inválido',
+    otp_validation_blocked: 'Validação de OTP bloqueada',
     sms_otp_login: 'Tentativa de autorização após OTP',
     controller_authorization_failed: 'Falha de autorização na controladora',
     session_denied: 'Sessão negada na etapa de autenticação',
@@ -1552,6 +1577,35 @@ function mapAuthEventLabel(eventType = '') {
     login_invalid_credentials: 'Login inválido'
   };
   return labels[eventType] || eventType;
+}
+
+function mapAuthEventDescription(event = {}) {
+  const details = event.details_json || {};
+  const attemptNumber = Number(details.otp_send_attempt_number);
+  const ordinal = buildPtOrdinal(attemptNumber);
+
+  if (event.event_type === 'otp_sent') {
+    if (ordinal) return `OTP enviado (${ordinal} envio)`;
+    return 'OTP enviado (1º envio)';
+  }
+
+  if (event.event_type === 'otp_resend') {
+    if (ordinal) return `OTP reenviado (${ordinal} envio)`;
+    return 'OTP reenviado';
+  }
+
+  const labels = {
+    otp_invalid: 'OTP inválido',
+    otp_validation_blocked: 'Validação de OTP bloqueada',
+    controller_authorization_failed: 'Falha de autorização na controladora',
+    otp_expired: 'OTP expirado',
+    sms_rate_limited: 'Envio de SMS temporariamente limitado',
+    sms_otp_login: 'Autorização iniciada após validação de OTP',
+    session_denied: 'Sessão negada na etapa de autenticação',
+    login_invalid_credentials: 'Credenciais inválidas'
+  };
+
+  return labels[event.event_type] || mapAuthEventLabel(event.event_type);
 }
 
 function mapSecurityEventLabel(eventType = '') {
@@ -1952,7 +2006,7 @@ app.get('/admin/auth-failures', async (req, res) => {
   if (macRaw && mac.length === 12) pushFilter("UPPER(regexp_replace(COALESCE(client_mac, ''), '[^A-Fa-f0-9]', '', 'g')) = ?", mac);
   if (ip) pushFilter('client_ip = ?', ip);
   if (lsid) pushFilter('lsid = ?', lsid);
-  if (eventType) pushFilter('LOWER(event_type) = ?', eventType);
+  if (eventType) pushFilter('event_type ILIKE ?', `%${eventType}%`);
   if (fromIso) pushFilter('created_at >= ?', fromIso);
   if (toIso) pushFilter('created_at <= ?', toIso);
 
@@ -1974,6 +2028,7 @@ app.get('/admin/auth-failures', async (req, res) => {
     events: rows.rows.map((event) => ({
       ...event,
       event_label: mapAuthEventLabel(event.event_type),
+      description_label: mapAuthEventDescription(event),
       created_at_label: formatDateTime(event.created_at),
       reason_label: mapSecurityReason(event.details_json?.reason || '')
     }))
