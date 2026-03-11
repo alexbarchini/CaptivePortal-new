@@ -1650,13 +1650,59 @@ function buildPtOrdinal(value) {
   return `${number}º`;
 }
 
+const AUTH_EVENTS_ALLOWED_PAGE_SIZES = [10, 20, 50, 100];
+const AUTH_FAILURE_EVENT_TYPES = [
+  'otp_invalid',
+  'otp_expired',
+  'otp_validation_blocked',
+  'sms_rate_limited',
+  'controller_authorization_failed',
+  'otp_flow_abandoned',
+  'login_invalid_credentials',
+  'session_denied'
+];
+const AUTH_OPERATIONAL_EVENT_TYPES = [
+  'portal_start',
+  'portal_ctx_captured',
+  'login_attempt_started',
+  'register_attempt_started',
+  'otp_sent',
+  'otp_resend',
+  'otp_verify_success',
+  'authorize_flow_started',
+  'session_authorized',
+  'session_closed',
+  'logout_logical_completed',
+  ...AUTH_FAILURE_EVENT_TYPES
+];
+
+function parsePageAndPageSize(reqQuery = {}, defaultPageSize = 20) {
+  const pageRaw = Number.parseInt(String(reqQuery.page || '1'), 10);
+  const page = Number.isInteger(pageRaw) && pageRaw > 0 ? pageRaw : 1;
+
+  const sizeRaw = Number.parseInt(String(reqQuery.page_size || defaultPageSize), 10);
+  const pageSize = AUTH_EVENTS_ALLOWED_PAGE_SIZES.includes(sizeRaw) ? sizeRaw : defaultPageSize;
+  const offset = (page - 1) * pageSize;
+  return { page, pageSize, offset };
+}
+
 function mapAuthEventLabel(eventType = '') {
   const labels = {
+    portal_start: 'Início do portal',
+    portal_ctx_captured: 'Contexto do portal capturado',
+    login_attempt_started: 'Tentativa de login iniciada',
+    register_attempt_started: 'Tentativa de cadastro iniciada',
     otp_sent: 'OTP enviado',
     otp_resend: 'OTP reenviado',
+    otp_verify_success: 'OTP validado com sucesso',
+    authorize_flow_started: 'Fluxo de autorização iniciado',
+    session_authorized: 'Sessão autorizada',
+    session_closed: 'Sessão encerrada',
+    logout_logical_completed: 'Logout lógico concluído',
     sms_rate_limited: 'Envio de SMS limitado por proteção',
     otp_invalid: 'OTP inválido',
     otp_validation_blocked: 'Validação de OTP bloqueada',
+    otp_flow_abandoned: 'Fluxo OTP abandonado',
     sms_otp_login: 'Tentativa de autorização após OTP',
     controller_authorization_failed: 'Falha de autorização na controladora',
     session_denied: 'Sessão negada na etapa de autenticação',
@@ -1682,11 +1728,21 @@ function mapAuthEventDescription(event = {}) {
   }
 
   const labels = {
+    portal_start: 'Abertura inicial do portal detectada',
+    portal_ctx_captured: 'Dados de contexto do portal capturados com sucesso',
+    login_attempt_started: 'Fluxo de login iniciado pelo usuário',
+    register_attempt_started: 'Fluxo de cadastro iniciado pelo usuário',
     otp_invalid: 'OTP inválido',
     otp_validation_blocked: 'Validação de OTP bloqueada',
     controller_authorization_failed: 'Falha de autorização na controladora',
     otp_expired: 'OTP expirado',
     sms_rate_limited: 'Envio de SMS temporariamente limitado',
+    otp_verify_success: 'Código OTP validado com sucesso',
+    authorize_flow_started: 'Autorização iniciada na controladora',
+    session_authorized: 'Sessão autorizada com sucesso',
+    session_closed: 'Sessão encerrada',
+    logout_logical_completed: 'Logout lógico concluído',
+    otp_flow_abandoned: 'Fluxo abandonado por timeout',
     sms_otp_login: 'Autorização iniciada após validação de OTP',
     session_denied: 'Sessão negada na etapa de autenticação',
     login_invalid_credentials: 'Credenciais inválidas'
@@ -2068,11 +2124,7 @@ app.get('/admin/lookup', (req, res) => {
   return res.redirect(query ? `/admin/sessions?${query}` : '/admin/sessions');
 });
 
-app.get('/admin/auth-events', (req, res) => {
-  return res.redirect('/admin/auth-failures');
-});
-
-app.get('/admin/auth-failures', async (req, res) => {
+function buildAdminAuthEventsQuery(req) {
   const cpf = cleanDigits(String(req.query.cpf || ''));
   const macRaw = String(req.query.mac || '').trim();
   const mac = normalizeMacForFilter(macRaw);
@@ -2083,6 +2135,8 @@ app.get('/admin/auth-failures', async (req, res) => {
   const toRaw = String(req.query.to || '').trim();
   const fromIso = parseDatetimeLocal(fromRaw);
   const toIso = parseDatetimeLocal(toRaw);
+
+  const { page, pageSize, offset } = parsePageAndPageSize(req.query, 20);
 
   const filters = [];
   const values = [];
@@ -2099,27 +2153,143 @@ app.get('/admin/auth-failures', async (req, res) => {
   if (fromIso) pushFilter('created_at >= ?', fromIso);
   if (toIso) pushFilter('created_at <= ?', toIso);
 
-  values.push(200);
-  const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
+  return {
+    cpf,
+    macRaw,
+    ip,
+    lsid,
+    eventType,
+    fromRaw,
+    toRaw,
+    page,
+    pageSize,
+    offset,
+    filters,
+    values,
+    pushFilter
+  };
+}
+
+app.get('/admin/auth-events', async (req, res) => {
+  const query = buildAdminAuthEventsQuery(req);
+  const allowedEventTypes = AUTH_OPERATIONAL_EVENT_TYPES;
+
+  query.values.push(allowedEventTypes);
+  query.filters.push(`event_type = ANY($${query.values.length}::text[])`);
+
+  query.values.push(query.pageSize + 1, query.offset);
+  const whereClause = query.filters.length > 0 ? `WHERE ${query.filters.join(' AND ')}` : '';
   const rows = await pool.query(
     `SELECT id, created_at, event_type, lsid, user_id, cpf, client_ip, client_mac, details_json
      FROM auth_events
      ${whereClause}
      ORDER BY created_at DESC
-     LIMIT $${values.length}`,
-    values
+     LIMIT $${query.values.length - 1} OFFSET $${query.values.length}`,
+    query.values
   );
 
-  return res.render('admin_auth_events', {
-    title: 'Administração · Auth Failures',
+  const hasNextPage = rows.rows.length > query.pageSize;
+  const events = rows.rows.slice(0, query.pageSize);
+
+  return res.render('admin_auth_events_all', {
+    title: 'Administração · Auth Events',
     adminUser: req.adminSession.user,
-    filters: { cpf, mac: macRaw, ip, lsid, event_type: eventType, from: fromRaw, to: toRaw },
-    events: rows.rows.map((event) => ({
+    filters: {
+      cpf: query.cpf,
+      mac: query.macRaw,
+      ip: query.ip,
+      lsid: query.lsid,
+      event_type: query.eventType,
+      from: query.fromRaw,
+      to: query.toRaw,
+      page_size: query.pageSize
+    },
+    events: events.map((event) => ({
       ...event,
       event_label: mapAuthEventLabel(event.event_type),
       description_label: mapAuthEventDescription(event),
       created_at_label: formatDateTime(event.created_at),
       reason_label: mapSecurityReason(event.details_json?.reason || '')
+    })),
+    pagination: {
+      page: query.page,
+      pageSize: query.pageSize,
+      hasNextPage,
+      hasPrevPage: query.page > 1,
+      prevPage: Math.max(1, query.page - 1),
+      nextPage: query.page + 1,
+      allowedPageSizes: AUTH_EVENTS_ALLOWED_PAGE_SIZES
+    }
+  });
+});
+
+app.get('/admin/auth-failures', async (req, res) => {
+  const query = buildAdminAuthEventsQuery(req);
+  query.values.push(AUTH_FAILURE_EVENT_TYPES);
+  query.filters.push(`event_type = ANY($${query.values.length}::text[])`);
+
+  query.values.push(query.pageSize + 1, query.offset);
+  const whereClause = query.filters.length > 0 ? `WHERE ${query.filters.join(' AND ')}` : '';
+  const rows = await pool.query(
+    `SELECT id, created_at, event_type, lsid, user_id, cpf, client_ip, client_mac, details_json
+     FROM auth_events
+     ${whereClause}
+     ORDER BY created_at DESC
+     LIMIT $${query.values.length - 1} OFFSET $${query.values.length}`,
+    query.values
+  );
+
+  const hasNextPage = rows.rows.length > query.pageSize;
+  const events = rows.rows.slice(0, query.pageSize);
+
+  return res.render('admin_auth_events', {
+    title: 'Administração · Auth Failures',
+    adminUser: req.adminSession.user,
+    filters: {
+      cpf: query.cpf,
+      mac: query.macRaw,
+      ip: query.ip,
+      lsid: query.lsid,
+      event_type: query.eventType,
+      from: query.fromRaw,
+      to: query.toRaw,
+      page_size: query.pageSize
+    },
+    events: events.map((event) => ({
+      ...event,
+      event_label: mapAuthEventLabel(event.event_type),
+      description_label: mapAuthEventDescription(event),
+      created_at_label: formatDateTime(event.created_at),
+      reason_label: mapSecurityReason(event.details_json?.reason || '')
+    })),
+    pagination: {
+      page: query.page,
+      pageSize: query.pageSize,
+      hasNextPage,
+      hasPrevPage: query.page > 1,
+      prevPage: Math.max(1, query.page - 1),
+      nextPage: query.page + 1,
+      allowedPageSizes: AUTH_EVENTS_ALLOWED_PAGE_SIZES
+    }
+  });
+});
+
+app.get('/admin/admin-audit', async (req, res) => {
+  const rows = await pool.query(
+    `SELECT id, created_at, event_type, lsid, cpf, client_ip, client_mac, details_json
+     FROM auth_events
+     WHERE event_type ILIKE 'admin_%'
+     ORDER BY created_at DESC
+     LIMIT 100`
+  );
+
+  return res.render('admin_audit_events', {
+    title: 'Administração · Auditoria Admin',
+    adminUser: req.adminSession.user,
+    events: rows.rows.map((event) => ({
+      ...event,
+      created_at_label: formatDateTime(event.created_at),
+      description_label: mapAuthEventDescription(event)
     }))
   });
 });

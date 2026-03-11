@@ -8,42 +8,21 @@
   <link rel="stylesheet" href="/public/admin.css" />
 </head>
 <body>
-  <%- include('partials/admin_header', { showLogout: true, pageTitle: 'Administração · Auth Failures' }) %>
+  <%- include('partials/admin_header', { showLogout: true, pageTitle: 'Administração · Auth Events' }) %>
   <main class="admin-shell">
     <section class="card admin-card">
-      <h2>Auth Failures</h2>
+      <h2>Auth Events</h2>
       <p class="subtle">Administrador: <strong><%= adminUser %></strong></p>
-      <%- include('partials/admin_navigation', { activeTab: 'auth-failures' }) %>
+      <%- include('partials/admin_navigation', { activeTab: 'auth-events' }) %>
 
-      <form method="get" action="/admin/auth-failures" class="admin-filters">
-        <div class="filter-field">
-          <label for="cpf">CPF</label>
-          <input id="cpf" name="cpf" value="<%= filters?.cpf || '' %>" placeholder="000.000.000-00" />
-        </div>
-        <div class="filter-field">
-          <label for="mac">MAC</label>
-          <input id="mac" name="mac" value="<%= filters?.mac || '' %>" placeholder="AA:BB:CC:DD:EE:FF" />
-        </div>
-        <div class="filter-field">
-          <label for="ip">IP</label>
-          <input id="ip" name="ip" value="<%= filters?.ip || '' %>" placeholder="172.27.0.12" />
-        </div>
-        <div class="filter-field">
-          <label for="lsid">LSID</label>
-          <input id="lsid" name="lsid" value="<%= filters?.lsid || '' %>" placeholder="ID da sessão" />
-        </div>
-        <div class="filter-field">
-          <label for="event_type">Evento</label>
-          <input id="event_type" name="event_type" value="<%= filters?.event_type || '' %>" placeholder="otp_invalid" />
-        </div>
-        <div class="filter-field">
-          <label for="from">De (data/hora)</label>
-          <input id="from" name="from" type="datetime-local" value="<%= filters?.from || '' %>" />
-        </div>
-        <div class="filter-field">
-          <label for="to">Até (data/hora)</label>
-          <input id="to" name="to" type="datetime-local" value="<%= filters?.to || '' %>" />
-        </div>
+      <form method="get" action="/admin/auth-events" class="admin-filters">
+        <div class="filter-field"><label for="cpf">CPF</label><input id="cpf" name="cpf" value="<%= filters?.cpf || '' %>" /></div>
+        <div class="filter-field"><label for="mac">MAC</label><input id="mac" name="mac" value="<%= filters?.mac || '' %>" /></div>
+        <div class="filter-field"><label for="ip">IP</label><input id="ip" name="ip" value="<%= filters?.ip || '' %>" /></div>
+        <div class="filter-field"><label for="lsid">LSID</label><input id="lsid" name="lsid" value="<%= filters?.lsid || '' %>" /></div>
+        <div class="filter-field"><label for="event_type">Evento</label><input id="event_type" name="event_type" value="<%= filters?.event_type || '' %>" placeholder="otp" /></div>
+        <div class="filter-field"><label for="from">De (data/hora)</label><input id="from" name="from" type="datetime-local" value="<%= filters?.from || '' %>" /></div>
+        <div class="filter-field"><label for="to">Até (data/hora)</label><input id="to" name="to" type="datetime-local" value="<%= filters?.to || '' %>" /></div>
         <div class="filter-field">
           <label for="page_size">Itens por página</label>
           <select id="page_size" name="page_size">
@@ -52,9 +31,7 @@
             <% }) %>
           </select>
         </div>
-        <div class="filter-actions">
-          <button type="submit">Filtrar</button>
-        </div>
+        <div class="filter-actions"><button type="submit">Filtrar</button></div>
       </form>
 
       <% const queryForPage = (targetPage) => {
@@ -73,11 +50,7 @@
 
       <div class="table-wrap">
         <table class="admin-table">
-          <thead>
-            <tr>
-              <th>Data/hora</th><th>Evento</th><th>CPF</th><th>MAC</th><th>IP</th><th>LSID</th><th>Motivo</th><th>Descrição</th>
-            </tr>
-          </thead>
+          <thead><tr><th>Data/hora</th><th>Evento</th><th>CPF</th><th>MAC</th><th>IP</th><th>LSID</th><th>Motivo</th><th>Descrição</th></tr></thead>
           <tbody>
             <% (events || []).forEach((event) => { %>
               <tr>
@@ -98,12 +71,8 @@
       <div class="admin-pagination">
         <span class="subtle">Página <strong><%= pagination?.page || 1 %></strong> · <strong><%= pagination?.pageSize || 20 %></strong> por página</span>
         <div class="admin-pagination-links">
-          <% if (pagination?.hasPrevPage) { %>
-            <a class="next-page" href="/admin/auth-failures?<%= queryForPage(pagination.prevPage) %>">Anterior</a>
-          <% } %>
-          <% if (pagination?.hasNextPage) { %>
-            <a class="next-page" href="/admin/auth-failures?<%= queryForPage(pagination.nextPage) %>">Próxima</a>
-          <% } %>
+          <% if (pagination?.hasPrevPage) { %><a class="next-page" href="/admin/auth-events?<%= queryForPage(pagination.prevPage) %>">Anterior</a><% } %>
+          <% if (pagination?.hasNextPage) { %><a class="next-page" href="/admin/auth-events?<%= queryForPage(pagination.nextPage) %>">Próxima</a><% } %>
         </div>
       </div>
     </section>

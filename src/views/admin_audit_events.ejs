@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= title %></title>
+  <link rel="stylesheet" href="/public/style.css" />
+  <link rel="stylesheet" href="/public/admin.css" />
+</head>
+<body>
+  <%- include('partials/admin_header', { showLogout: true, pageTitle: 'Administração · Auditoria Admin' }) %>
+  <main class="admin-shell">
+    <section class="card admin-card">
+      <h2>Auditoria Admin</h2>
+      <p class="subtle">Administrador: <strong><%= adminUser %></strong></p>
+      <%- include('partials/admin_navigation', { activeTab: 'admin-audit' }) %>
+      <div class="table-wrap">
+        <table class="admin-table">
+          <thead><tr><th>Data/hora</th><th>Evento</th><th>CPF</th><th>MAC</th><th>IP</th><th>LSID</th><th>Descrição</th></tr></thead>
+          <tbody>
+            <% (events || []).forEach((event) => { %>
+              <tr>
+                <td><%= event.created_at_label %></td>
+                <td><%= event.event_type %></td>
+                <td><%= event.cpf || '-' %></td>
+                <td><%= event.client_mac || '-' %></td>
+                <td><%= event.client_ip || '-' %></td>
+                <td class="truncate" title="<%= event.lsid || '-' %>"><%= event.lsid || '-' %></td>
+                <td class="truncate" title="<%= event.description_label || '-' %>"><%= event.description_label || '-' %></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
