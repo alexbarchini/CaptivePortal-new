@@ -1877,14 +1877,26 @@ app.post('/admin/sessions/:lsid/terminate', async (req, res) => {
       correlationType: session.cpf_normalizado ? 'cpf' : (session.client_mac ? 'mac' : 'ip'),
       correlationValue: session.cpf_normalizado || normalizeMacIfPlain(session.client_mac) || normalizeClientIp(session.uip),
       description: disconnectResult.success
-        ? 'Desconexão confirmada pela controladora SmartZone.'
-        : 'Falha ao desconectar sessão na controladora SmartZone.',
+        ? 'Sessão desconectada com sucesso na controladora SmartZone'
+        : 'Falha ao desconectar sessão na controladora SmartZone',
       reason: disconnectResult.success ? 'controller disconnect success' : 'controller disconnect failed',
       details: {
         ...disconnectAuditDetails,
         request_id: disconnectResult.requestId || null,
+        endpoint: disconnectResult.endpoint || null,
+        host_selected: session.nbi_ip || null,
+        payload: {
+          RequestType: 'Disconnect',
+          'UE-IP': session.uip || null,
+          'UE-MAC': session.client_mac || null,
+          'UE-Proxy': session.proxy || '0',
+          'UE-Username': session.username_radius || `visitante_${session.cpf_normalizado || ''}`
+        },
+        http_status: disconnectResult.httpStatus || null,
         response_code: String(disconnectResult.detail?.ResponseCode || ''),
-        reply_message: String(disconnectResult.detail?.ReplyMessage || '')
+        reply_message: String(disconnectResult.detail?.ReplyMessage || ''),
+        interpreted_result: disconnectResult.success ? 'success' : 'failure',
+        interpretation_reason: disconnectResult.interpretationReason || null
       }
     });
 
