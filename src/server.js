@@ -2308,18 +2308,45 @@ app.get('/verify/sms', async (req, res) => {
   if (!lsid) return res.redirect('/portal');
 
   const sessionQuery = await pool.query(
-    `SELECT ls.id, ls.user_id, ls.ctx_json, ls.expires_at, ls.consumed_at, ls.authorized_at, ls.nbi_ip, ls.uip, ls.client_mac, ls.proxy, ls.ssid, ls.sip, ls.dn, ls.wlan_name, ls.url, ls.apip, ls.vlan, u.phone_e164
+    `SELECT ls.id, ls.user_id, ls.status, ls.ctx_json, ls.expires_at, ls.consumed_at, ls.authorized_at, ls.nbi_ip, ls.uip, ls.client_mac, ls.proxy, ls.ssid, ls.sip, ls.dn, ls.wlan_name, ls.url, ls.apip, ls.vlan, u.phone_e164
      FROM login_sessions ls
      JOIN users u ON u.id = ls.user_id
      WHERE ls.id = $1`,
     [lsid]
   );
 
-  if (sessionQuery.rowCount === 0) return res.redirect('/portal');
+  if (sessionQuery.rowCount === 0) {
+    logInfo('otp_step_navigation', {
+      lsid,
+      route_target: '/verify/sms',
+      source: 'direct',
+      session_found: false,
+      context_loaded_from_db: false
+    });
+    return res.redirect('/portal');
+  }
   const session = sessionQuery.rows[0];
-  if (session.status !== 'PENDING' || session.authorized_at || session.consumed_at || new Date(session.expires_at) < new Date()) return res.redirect('/portal');
+  const sessionCtx = buildCtxFromSession(session);
+  if (session.status !== 'PENDING' || session.authorized_at || session.consumed_at || new Date(session.expires_at) < new Date()) {
+    logInfo('otp_step_navigation', {
+      lsid,
+      route_target: '/verify/sms',
+      source: 'direct',
+      session_found: true,
+      context_loaded_from_db: false
+    });
+    return res.redirect('/portal');
+  }
 
-  logCtxPresence('verify_sms_ctx_lookup', lsid, buildCtxFromSession(session));
+  logInfo('otp_step_navigation', {
+    lsid,
+    route_target: '/verify/sms',
+    source: 'direct',
+    session_found: true,
+    context_loaded_from_db: true
+  });
+
+  logCtxPresence('verify_sms_ctx_lookup', lsid, sessionCtx);
   const cooldown = await ensureResendCooldown(session.user_id, lsid);
 
   return res.render('verify_sms', {
@@ -2329,7 +2356,7 @@ app.get('/verify/sms', async (req, res) => {
     lsid,
     maskedPhone: session.phone_e164.replace(/(\+55\d{2})\d{5}(\d{4})/, '$1*****$2'),
     resendWaitSeconds: cooldown.waitSeconds,
-    contextBadge: buildContextBadge(buildCtxFromSession(session))
+    contextBadge: buildContextBadge(sessionCtx)
   });
 });
 
@@ -2412,6 +2439,13 @@ app.post('/register', async (req, res) => {
     try {
       await sendOtpForUser({ userId: user.id, phoneE164: user.phone_e164, reason: 'register', ueIp: wispr.userIp, ueMac: wispr.userMac, lsid });
       logInfo('register_attempt_success', { ...requestContext, user_id: user.id, normalized_cpf: user.cpf_normalizado });
+      logInfo('otp_step_navigation', {
+        lsid,
+        route_target: '/verify/sms',
+        source: 'register',
+        session_found: true,
+        context_loaded_from_db: Boolean(hasRequiredWispr(params))
+      });
       return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
     } catch (smsError) {
       logError('register_sms_send_failed', { ...requestContext, user_id: user.id, normalized_cpf: user.cpf_normalizado, error: smsError });
@@ -2504,6 +2538,13 @@ app.post('/login', async (req, res) => {
       logInfo('otp_resend_skipped_recent_valid', { user_id: user.id, ue_ip: wispr.userIp, ue_mac: maskMac(wispr.userMac), window_seconds: OTP_VALID_REUSE_WINDOW_SECONDS });
     }
 
+    logInfo('otp_step_navigation', {
+      lsid,
+      route_target: '/verify/sms',
+      source: 'login',
+      session_found: true,
+      context_loaded_from_db: Boolean(hasRequiredWispr(params))
+    });
     return res.redirect(`/verify/sms?lsid=${encodeURIComponent(lsid)}`);
   } catch (error) {
     const shouldCountAsInvalidCredential = !(error instanceof AuthFlowError && ['login_bruteforce_blocked', 'otp_send_rate_limited'].includes(error.reason));
@@ -2548,7 +2589,7 @@ app.post('/verify/sms/resend', async (req, res) => {
 
   try {
     const sessionQuery = await pool.query(
-      `SELECT ls.id, ls.user_id, ls.ctx_json, ls.expires_at, ls.consumed_at, ls.authorized_at, ls.nbi_ip, ls.uip, ls.client_mac, ls.proxy, ls.ssid, ls.sip, ls.dn, ls.wlan_name, ls.url, ls.apip, ls.vlan, u.phone_e164
+      `SELECT ls.id, ls.user_id, ls.status, ls.ctx_json, ls.expires_at, ls.consumed_at, ls.authorized_at, ls.nbi_ip, ls.uip, ls.client_mac, ls.proxy, ls.ssid, ls.sip, ls.dn, ls.wlan_name, ls.url, ls.apip, ls.vlan, u.phone_e164
        FROM login_sessions ls
        JOIN users u ON u.id = ls.user_id
        WHERE ls.id = $1`,
@@ -3183,8 +3224,30 @@ app.get('/terms', (_, res) => {
   res.render('terms', { title: 'Termos de Uso' });
 });
 
-app.get('/success', (req, res) => {
-  res.render('success', { title: 'Conectado' });
+app.get('/success', async (req, res) => {
+  const portalSessionUserId = String(req.cookies?.portal_session || '').trim();
+  if (!portalSessionUserId) {
+    logInfo('success_guard_blocked', { request_ip: req.ip, reason: 'missing_portal_session_cookie' });
+    return res.redirect('/portal');
+  }
+
+  const portalSessionUserIdNumber = Number(portalSessionUserId);
+  if (!Number.isInteger(portalSessionUserIdNumber) || portalSessionUserIdNumber <= 0) {
+    logInfo('success_guard_blocked', { request_ip: req.ip, reason: 'invalid_portal_session_cookie' });
+    return res.redirect('/portal');
+  }
+
+  const activeSession = await getActiveSessionByUserId(portalSessionUserIdNumber);
+  if (!activeSession) {
+    logInfo('success_guard_blocked', {
+      request_ip: req.ip,
+      reason: 'no_active_authorized_session',
+      user_id: portalSessionUserIdNumber
+    });
+    return res.redirect('/portal');
+  }
+
+  return res.render('success', { title: 'Conectado' });
 });
 
 async function bootstrap() {
