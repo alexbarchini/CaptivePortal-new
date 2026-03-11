@@ -96,14 +96,15 @@
       </div>
 
       <div class="admin-pagination">
-        <span class="subtle">Página <strong><%= pagination?.page || 1 %></strong> · <strong><%= pagination?.pageSize || 20 %></strong> por página</span>
+        <span class="subtle">Página <strong><%= pagination?.current_page || 1 %></strong> de <strong><%= pagination?.total_pages || 1 %></strong> · Total: <strong><%= pagination?.total_count || 0 %></strong> · <strong><%= pagination?.page_size || 20 %></strong> por página</span>
         <div class="admin-pagination-links">
-          <% if (pagination?.hasPrevPage) { %>
-            <a class="next-page" href="/admin/auth-failures?<%= queryForPage(pagination.prevPage) %>">Anterior</a>
-          <% } %>
-          <% if (pagination?.hasNextPage) { %>
-            <a class="next-page" href="/admin/auth-failures?<%= queryForPage(pagination.nextPage) %>">Próxima</a>
-          <% } %>
+          <a class="pagination-btn <%= (pagination?.current_page || 1) <= 1 ? 'is-disabled' : '' %>" href="<%= (pagination?.current_page || 1) <= 1 ? '#' : '/admin/auth-failures?' + queryForPage(pagination.firstPage) %>">&lt;&lt;</a>
+          <a class="pagination-btn <%= (pagination?.current_page || 1) <= 1 ? 'is-disabled' : '' %>" href="<%= (pagination?.current_page || 1) <= 1 ? '#' : '/admin/auth-failures?' + queryForPage(pagination.prevPage) %>">&lt;</a>
+          <% (pagination?.pageWindow || [1]).forEach((pageNumber) => { %>
+            <a class="pagination-btn <%= pageNumber === (pagination?.current_page || 1) ? 'is-active' : '' %>" href="/admin/auth-failures?<%= queryForPage(pageNumber) %>"><%= pageNumber %></a>
+          <% }) %>
+          <a class="pagination-btn <%= !(pagination?.hasNextPage) ? 'is-disabled' : '' %>" href="<%= !(pagination?.hasNextPage) ? '#' : '/admin/auth-failures?' + queryForPage(pagination.nextPage) %>">&gt;</a>
+          <a class="pagination-btn <%= !(pagination?.hasNextPage) ? 'is-disabled' : '' %>" href="<%= !(pagination?.hasNextPage) ? '#' : '/admin/auth-failures?' + queryForPage(pagination.lastPage) %>">&gt;&gt;</a>
         </div>
       </div>
     </section>

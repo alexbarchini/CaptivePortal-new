@@ -44,6 +44,14 @@
           <label for="to">Até (data/hora)</label>
           <input id="to" name="to" type="datetime-local" value="<%= filters?.to || '' %>" />
         </div>
+        <div class="filter-field">
+          <label for="page_size">Itens por página</label>
+          <select id="page_size" name="page_size">
+            <% (pagination?.allowedPageSizes || [10, 20, 50, 100]).forEach((size) => { %>
+              <option value="<%= size %>" <%= Number(filters?.page_size || 20) === Number(size) ? 'selected' : '' %>><%= size %></option>
+            <% }) %>
+          </select>
+        </div>
         <div class="filter-field filter-status">
           <span class="filter-label">Apenas bloqueios ativos</span>
           <label class="checkbox-inline">
@@ -54,6 +62,21 @@
           <button type="submit">Filtrar</button>
         </div>
       </form>
+
+      <% const queryForPage = (targetPage) => {
+        const params = new URLSearchParams();
+        params.set('page', String(targetPage));
+        params.set('page_size', String(filters?.page_size || 20));
+        if (filters?.cpf) params.set('cpf', filters.cpf);
+        if (filters?.mac) params.set('mac', filters.mac);
+        if (filters?.ip) params.set('ip', filters.ip);
+        if (filters?.event_type) params.set('event_type', filters.event_type);
+        if (filters?.severity) params.set('severity', filters.severity);
+        if (filters?.from) params.set('from', filters.from);
+        if (filters?.to) params.set('to', filters.to);
+        if (filters?.only_active_blocks) params.set('only_active_blocks', 'true');
+        return params.toString();
+      }; %>
 
       <div class="table-wrap">
         <table class="admin-table">
@@ -84,6 +107,19 @@
             <% }) %>
           </tbody>
         </table>
+      </div>
+
+      <div class="admin-pagination">
+        <span class="subtle">Página <strong><%= pagination?.current_page || 1 %></strong> de <strong><%= pagination?.total_pages || 1 %></strong> · Total: <strong><%= pagination?.total_count || 0 %></strong> · <strong><%= pagination?.page_size || 20 %></strong> por página</span>
+        <div class="admin-pagination-links">
+          <a class="pagination-btn <%= (pagination?.current_page || 1) <= 1 ? 'is-disabled' : '' %>" href="<%= (pagination?.current_page || 1) <= 1 ? '#' : '/admin/security-events?' + queryForPage(pagination.firstPage) %>">&lt;&lt;</a>
+          <a class="pagination-btn <%= (pagination?.current_page || 1) <= 1 ? 'is-disabled' : '' %>" href="<%= (pagination?.current_page || 1) <= 1 ? '#' : '/admin/security-events?' + queryForPage(pagination.prevPage) %>">&lt;</a>
+          <% (pagination?.pageWindow || [1]).forEach((pageNumber) => { %>
+            <a class="pagination-btn <%= pageNumber === (pagination?.current_page || 1) ? 'is-active' : '' %>" href="/admin/security-events?<%= queryForPage(pageNumber) %>"><%= pageNumber %></a>
+          <% }) %>
+          <a class="pagination-btn <%= !(pagination?.hasNextPage) ? 'is-disabled' : '' %>" href="<%= !(pagination?.hasNextPage) ? '#' : '/admin/security-events?' + queryForPage(pagination.nextPage) %>">&gt;</a>
+          <a class="pagination-btn <%= !(pagination?.hasNextPage) ? 'is-disabled' : '' %>" href="<%= !(pagination?.hasNextPage) ? '#' : '/admin/security-events?' + queryForPage(pagination.lastPage) %>">&gt;&gt;</a>
+        </div>
       </div>
     </section>
   </main>
