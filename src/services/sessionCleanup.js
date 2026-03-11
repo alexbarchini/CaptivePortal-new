@@ -138,4 +138,70 @@ async function closeStaleAuthorizedOpenSessions(maxAgeHours = 24) {
   }
 }
 
-module.exports = { enforceMaxOpenSessions, enforceMaxOpenSessionsTx, closeStaleAuthorizedOpenSessions };
+async function closeExpiredPendingSessions(pendingTimeoutMinutes = 60) {
+  const parsedPendingTimeoutMinutes = Number(pendingTimeoutMinutes);
+  if (!Number.isFinite(parsedPendingTimeoutMinutes) || parsedPendingTimeoutMinutes <= 0) {
+    return { closedCount: 0 };
+  }
+
+  const timeoutMinutes = Math.floor(parsedPendingTimeoutMinutes);
+
+  try {
+    const result = await pool.query(
+      `WITH closed_sessions AS (
+         UPDATE login_sessions
+         SET status = 'CLOSED',
+             closed_at = COALESCE(closed_at, NOW()),
+             closed_reason = 'pending_timeout'
+         WHERE status = 'PENDING'
+           AND created_at < NOW() - ($1::int * INTERVAL '1 minute')
+         RETURNING id, user_id, uip, client_mac, ssid, apip, vlan, user_agent
+       ),
+       inserted_events AS (
+         INSERT INTO auth_events (event_type, lsid, user_id, cpf, client_mac, client_ip, ssid, ap_ip, vlan, user_agent, details_json, login_session_id, status, detail)
+         SELECT
+           'otp_flow_abandoned',
+           cs.id,
+           cs.user_id,
+           u.cpf_normalizado,
+           cs.client_mac,
+           cs.uip,
+           cs.ssid,
+           cs.apip,
+           cs.vlan,
+           cs.user_agent,
+           jsonb_build_object('reason', 'pending_timeout', 'session_id', cs.id),
+           cs.id,
+           'info',
+           jsonb_build_object('reason', 'pending_timeout', 'session_id', cs.id)
+         FROM closed_sessions cs
+         LEFT JOIN users u ON u.id = cs.user_id
+       )
+       SELECT COUNT(*)::int AS closed_count
+       FROM closed_sessions`,
+      [timeoutMinutes]
+    );
+
+    const closedCount = result.rows[0]?.closed_count || 0;
+    if (closedCount > 0) {
+      logInfo('session_cleanup_pending_timeout_closed', {
+        timeout_minutes: timeoutMinutes,
+        closed_count: closedCount,
+        event_type: 'otp_flow_abandoned',
+        reason: 'pending_timeout'
+      });
+    }
+
+    return { closedCount };
+  } catch (error) {
+    logError('session_cleanup_pending_timeout_failed', { error, timeout_minutes: timeoutMinutes });
+    return { closedCount: 0 };
+  }
+}
+
+module.exports = {
+  enforceMaxOpenSessions,
+  enforceMaxOpenSessionsTx,
+  closeStaleAuthorizedOpenSessions,
+  closeExpiredPendingSessions
+};
